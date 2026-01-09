@@ -29,8 +29,9 @@ The app runs at `http://localhost:5050`.
 
 **Hosting:** Google Cloud Run (Free Tier - 1GB RAM, 300s timeout, ~3000 searches/month free)
 
-#### Deployment Command
+#### Deployment (from local machine, not GitHub)
 ```bash
+# Run from project root directory
 gcloud run deploy cr-tournament-finder \
   --source . \
   --region europe-west3 \
@@ -54,6 +55,8 @@ gcloud run deploy cr-tournament-finder \
 - Region: `europe-west3` (Frankfurt)
 - 1GB RAM allows 15 parallel search workers (faster than Render)
 - Cold start ~5-10s when idle
+- **No auto-deploy**: Code is uploaded from local machine via `--source .`, not pulled from GitHub
+- Redeploy manually after code changes by running the deployment command above
 
 ### Backup: Render.com
 
