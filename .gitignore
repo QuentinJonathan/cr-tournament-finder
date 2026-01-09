@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# App-specific
+config.json
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files (optional, remove if you want to include them)
+# test_*.py
+# *_test.py

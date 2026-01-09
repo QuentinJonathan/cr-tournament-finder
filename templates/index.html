@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CR Tournament Finder</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🏆 Tournament Finder</h1>
+            <p class="subtitle">Find Clash Royale tournaments</p>
+            <button id="shutdown-btn" class="btn-shutdown" title="Stop server and close">✕ Shutdown</button>
+        </header>
+
+        <!-- API Key Management -->
+        <div id="api-key-section" class="card">
+            <div class="settings-header">
+                <h2>⚙️ API Key</h2>
+                <button id="toggle-key-section" class="btn-icon" title="Toggle">▼</button>
+            </div>
+            <div id="api-key-content">
+                <p>Get your key from <a href="https://developer.clashroyale.com" target="_blank">developer.clashroyale.com</a></p>
+
+                <div id="current-key-display" class="current-key hidden">
+                    <span class="key-label">Current key:</span>
+                    <code id="masked-key">Not set</code>
+                    <button id="change-key-btn" class="btn secondary small">Change</button>
+                </div>
+
+                <div id="key-input-section" class="input-group">
+                    <input type="password" id="api-key-input" placeholder="Paste your API key...">
+                    <button id="toggle-visibility" class="btn-icon" title="Show/Hide">👁</button>
+                    <button id="save-api-key" class="btn primary">Save</button>
+                </div>
+
+                <p class="key-hint">💡 API keys are IP-locked. Create a new key if your IP changes.</p>
+            </div>
+        </div>
+
+        <!-- Filters -->
+        <div id="filters-section" class="card">
+            <h2>Filters</h2>
+            <div class="filters-grid">
+                <div class="filter-group">
+                    <label for="tournament-type">Tournament Type</label>
+                    <select id="tournament-type">
+                        <option value="open" selected>Open Only</option>
+                        <option value="password">Password Protected</option>
+                        <option value="all">All</option>
+                    </select>
+                </div>
+
+                <div class="filter-group">
+                    <label for="status">Status</label>
+                    <select id="status">
+                        <option value="all" selected>All</option>
+                        <option value="inProgress">In Progress</option>
+                        <option value="inPreparation">In Preparation</option>
+                    </select>
+                </div>
+
+                <div class="filter-group">
+                    <label for="game-mode">Game Mode</label>
+                    <select id="game-mode" multiple>
+                        <!-- Populated by JS -->
+                    </select>
+                    <small>Ctrl/Cmd+click for multiple</small>
+                </div>
+
+                <div class="filter-group">
+                    <label for="level-cap">Level Cap</label>
+                    <select id="level-cap" multiple>
+                        <option value="11">11</option>
+                        <option value="12">12</option>
+                        <option value="13">13</option>
+                        <option value="14">14</option>
+                        <option value="15">15</option>
+                        <option value="16">16</option>
+                    </select>
+                    <small>Ctrl/Cmd+click for multiple</small>
+                </div>
+
+                <div class="filter-group">
+                    <label for="min-players">Min Players</label>
+                    <input type="number" id="min-players" min="0" value="0">
+                </div>
+
+                <div class="filter-group">
+                    <label for="max-players">Max Players</label>
+                    <input type="number" id="max-players" min="0" placeholder="No limit">
+                </div>
+
+                <div class="filter-group">
+                    <label for="min-remaining">Min Time Left (min)</label>
+                    <input type="number" id="min-remaining" min="0" value="0">
+                </div>
+
+                <div class="filter-group">
+                    <label for="max-remaining">Max Time Left (min)</label>
+                    <input type="number" id="max-remaining" min="0" placeholder="No limit">
+                </div>
+            </div>
+
+            <div class="filter-actions">
+                <button id="search-btn" class="btn primary large">
+                    <span class="btn-text">🔍 Search Tournaments</span>
+                    <span class="btn-loading hidden">
+                        <span class="spinner"></span>
+                        Fetching...
+                    </span>
+                </button>
+                <button id="save-defaults-btn" class="btn secondary">Save as Defaults</button>
+            </div>
+        </div>
+
+        <!-- Status Message -->
+        <div id="status-message" class="status-message hidden"></div>
+
+        <!-- Results -->
+        <div id="results-section" class="card hidden">
+            <h2>Results <span id="results-count"></span></h2>
+            <div class="table-container">
+                <table id="results-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Mode</th>
+                            <th>Players</th>
+                            <th>Level</th>
+                            <th>Status</th>
+                            <th>Running</th>
+                            <th>Time Left</th>
+                            <th>Tag</th>
+                        </tr>
+                    </thead>
+                    <tbody id="results-body">
+                        <!-- Populated by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Toast for copy notification -->
+        <div id="toast" class="toast hidden">Copied!</div>
+
+        <!-- Debug Section -->
+        <div id="debug-section" class="card debug-card">
+            <div class="debug-header">
+                <h2>🔍 Debug Log</h2>
+                <button id="toggle-debug" class="btn-icon" title="Toggle">▼</button>
+            </div>
+            <div id="debug-content" class="collapsed">
+                <!-- Stats from last search -->
+                <div id="debug-stats" class="debug-stats hidden">
+                    <h3>Last Search Stats</h3>
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <span class="stat-label">Queries:</span>
+                            <span id="stat-queries">-</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Drill-downs:</span>
+                            <span id="stat-drilldowns">-</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Rate Limits:</span>
+                            <span id="stat-ratelimits">-</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">API Errors:</span>
+                            <span id="stat-errors">-</span>
+                        </div>
+                    </div>
+                    <div id="mode-breakdown" class="mode-breakdown">
+                        <h4>Tournaments by Game Mode (before filters)</h4>
+                        <div id="mode-list"></div>
+                    </div>
+                </div>
+
+                <!-- Tag Search -->
+                <div class="tag-search">
+                    <h3>Search Log for Tag</h3>
+                    <p>Check if a specific tournament was found</p>
+                    <div class="tag-search-input">
+                        <input type="text" id="tag-search-input" placeholder="#ABC123">
+                        <button id="tag-search-btn" class="btn secondary">Search</button>
+                    </div>
+                    <div id="tag-search-result" class="tag-search-result hidden"></div>
+                </div>
+
+                <!-- Log Viewer -->
+                <div class="log-viewer">
+                    <div class="log-header">
+                        <h3>Recent Log Entries</h3>
+                        <button id="refresh-logs-btn" class="btn secondary small">Refresh</button>
+                    </div>
+                    <pre id="log-output">Click "Refresh" to load logs...</pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
