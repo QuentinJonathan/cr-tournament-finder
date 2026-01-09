@@ -230,7 +230,8 @@ def fetch_tournament_details_batch(tournaments):
 
     tags = [t['tag'] for t in tournaments]
 
-    with ThreadPoolExecutor(max_workers=min(40, len(tags))) as executor:
+    max_detail_workers = int(os.environ.get('DETAIL_WORKERS', 10))
+    with ThreadPoolExecutor(max_workers=min(max_detail_workers, len(tags))) as executor:
         details = list(executor.map(fetch_tournament_detail, tags))
 
     for tournament, detail in zip(tournaments, details):
@@ -286,7 +287,8 @@ def fetch_all_tournaments():
     searched = set()
     to_search = list(queries)
 
-    WORKERS = 40
+    # Reduce workers on low-memory servers (Free tier = 512MB)
+    WORKERS = int(os.environ.get('SEARCH_WORKERS', 10))
 
     while to_search:
         # Dedupe
