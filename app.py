@@ -674,7 +674,12 @@ def api_logs():
 def api_get_config():
     """Get saved config"""
     config = load_config()
-    api_key = config.get('api_key', '')
+
+    # Check for API key: env var takes precedence
+    env_api_key = os.environ.get('CR_API_KEY', '')
+    config_api_key = config.get('api_key', '')
+    api_key = env_api_key or config_api_key
+    api_key_from_env = bool(env_api_key)
 
     # Mask the API key for display (show first 10 and last 6 chars)
     masked_key = None
@@ -683,6 +688,7 @@ def api_get_config():
 
     return jsonify({
         "has_api_key": bool(api_key),
+        "api_key_from_env": api_key_from_env,
         "masked_key": masked_key,
         "filters": config.get('filters', {})
     })

@@ -80,11 +80,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
             hasApiKey = data.has_api_key;
 
-            if (hasApiKey && data.masked_key) {
+            if (data.api_key_from_env) {
+                // API key is set via environment variable - hide entire section
+                currentKeyDisplay.classList.remove('hidden');
+                keyInputSection.classList.add('hidden');
+                maskedKey.textContent = '(Set via Environment Variable)';
+                changeKeyBtn.classList.add('hidden');
+                // Collapse section by default
+                apiKeyContent.classList.add('collapsed');
+                toggleKeySection.classList.add('rotated');
+            } else if (hasApiKey && data.masked_key) {
                 // Show current key info, hide input
                 currentKeyDisplay.classList.remove('hidden');
                 keyInputSection.classList.add('hidden');
                 maskedKey.textContent = data.masked_key;
+                changeKeyBtn.classList.remove('hidden');
                 // Collapse section by default when key exists
                 apiKeyContent.classList.add('collapsed');
                 toggleKeySection.classList.add('rotated');
