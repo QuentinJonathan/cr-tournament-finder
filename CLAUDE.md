@@ -21,40 +21,61 @@ open "Launch Tournament Finder.command"
 
 The app runs at `http://localhost:5050`.
 
-## Deployment Status (WIP)
+## Production Deployment
 
-### Was bereits erledigt ist:
-- [x] Auto-Shutdown entfernt (für Server-Deployment)
-- [x] Session-basierte Authentifizierung hinzugefügt (`/login`, 30-Tage Cookie)
-- [x] API-Key über Environment Variable (`CR_API_KEY`)
-- [x] RoyaleAPI Proxy aktiviert (`proxy.royaleapi.dev` statt `api.clashroyale.com`)
-- [x] `wsgi.py` für Gunicorn erstellt
-- [x] `Procfile` für Render erstellt
-- [x] `.gitignore` erstellt
-- [x] GitHub Repo erstellt: https://github.com/QuentinJonathan/cr-tournament-finder (public)
+### Primary: Google Cloud Run
 
-### Nächster Schritt: Render.com Deployment
+**Live URL:** https://cr-tournament-finder-98463050344.europe-west3.run.app
 
-Manuell im Render Dashboard erstellen (Free Tier):
+**Hosting:** Google Cloud Run (Free Tier - 1GB RAM, 300s timeout, ~3000 searches/month free)
 
-1. https://dashboard.render.com → "New +" → "Web Service" → "Public Git repository"
-2. Repo URL: `https://github.com/QuentinJonathan/cr-tournament-finder`
-3. Settings:
-   - Name: `cr-tournament-finder`
-   - Region: Frankfurt
-   - Build Command: `pip install -r requirements.txt`
-   - Start Command: `gunicorn wsgi:app`
-   - Instance Type: **Free**
-4. Environment Variables hinzufügen:
-   - `CR_API_KEY` = (der Clash Royale API Key aus config.json)
-   - `CR_FINDER_PASSWORD` = `CRFinder2024!` (oder eigenes wählen)
-   - `FLASK_ENV` = `production`
-5. "Create Web Service"
+#### Deployment Command
+```bash
+gcloud run deploy cr-tournament-finder \
+  --source . \
+  --region europe-west3 \
+  --allow-unauthenticated \
+  --memory 1Gi \
+  --timeout 300 \
+  --concurrency 10 \
+  --min-instances 0 \
+  --max-instances 1 \
+  --set-env-vars "FLASK_ENV=production,SEARCH_WORKERS=15,DETAIL_WORKERS=10" \
+  --set-secrets "CR_API_KEY=cr-api-key:latest,CR_FINDER_PASSWORD=cr-finder-password:latest,FLASK_SECRET_KEY=flask-secret-key:latest"
+```
 
-### Wichtige Hinweise:
-- Render Free Tier schläft nach 15 Min Inaktivität ein (Cold Start ~30s)
-- API nutzt RoyaleAPI Proxy (IP `45.79.218.79` muss bei Supercell whitelisted sein)
-- Render MCP kann keine Free-Tier Services erstellen (muss manuell gemacht werden)
+#### Secrets (managed via GCP Secret Manager)
+- `cr-api-key` - Clash Royale API key
+- `cr-finder-password` - Login password
+- `flask-secret-key` - Session encryption
+
+#### Cloud Run Notes
+- Project: `cr-tournament-finder`
+- Region: `europe-west3` (Frankfurt)
+- 1GB RAM allows 15 parallel search workers (faster than Render)
+- Cold start ~5-10s when idle
+
+### Backup: Render.com
+
+**URL:** https://cr-tournament-finder.onrender.com
+
+**Hosting:** Render.com (Free Tier - 512MB RAM, sleeps after 15 min inactivity)
+
+#### Environment Variables (Render Dashboard)
+
+| Variable | Purpose |
+|----------|---------|
+| `CR_API_KEY` | Clash Royale API key (uses RoyaleAPI proxy, IP `45.79.218.79`) |
+| `CR_FINDER_PASSWORD` | Login password for web UI |
+| `FLASK_SECRET_KEY` | Session encryption key (auto-generated) |
+| `FLASK_ENV` | Set to `production` |
+| `SEARCH_WORKERS` | Parallel search threads (default: 10) |
+| `DETAIL_WORKERS` | Parallel detail fetch threads (default: 10) |
+
+### Shared Deployment Notes
+- Uses RoyaleAPI Proxy (`proxy.royaleapi.dev`) to bypass IP restrictions
+- Gunicorn with 300s timeout for long searches
+- Dockerfile included for containerized deployment
 
 ## Architecture
 
@@ -88,7 +109,9 @@ Vanilla HTML/CSS/JS with no build step. Frontend sends heartbeat every 30s to ke
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/` | GET | Serve main page |
+| `/` | GET | Serve main page (requires auth) |
+| `/login` | GET/POST | Login page |
+| `/logout` | GET | Clear session |
 | `/api/tournaments` | GET | Fetch and filter tournaments |
 | `/api/game-modes` | GET | Get game mode ID → name mapping |
 | `/api/config` | GET/POST | Read/save API key and filter defaults |
