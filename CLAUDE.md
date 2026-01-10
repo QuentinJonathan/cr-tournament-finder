@@ -139,6 +139,30 @@ Vanilla HTML/CSS/JS with no build step. Frontend sends heartbeat every 30s to ke
 - Toast: slide-up with bounce easing
 - Status badges: pulse animation for active tournaments
 
+### PWA (Progressive Web App)
+The app is installable as a standalone app on mobile and desktop.
+
+**Files:**
+- `manifest.json`: App name, icons, theme colors, display mode
+- `static/service-worker.js`: Static asset caching, offline fallback
+- `static/icons/`: App icons (192x192, 512x512, maskable, apple-touch-icon, favicon)
+
+**Features:**
+- Standalone display mode (no browser UI)
+- Gold theme color (`#f4d03f`) in address bar
+- Offline fallback page when no connection
+- Cache-first for static assets, network-first for HTML
+- iOS support via apple-mobile-web-app meta tags
+
+**Installation:**
+- Android: Chrome menu → "Install app" or "Add to Home screen"
+- iOS: Safari → Share → "Add to Home Screen"
+- Desktop: Chrome address bar install icon
+
+**Testing:**
+- Chrome DevTools → Application → Manifest (check for errors)
+- Lighthouse → PWA audit (should show "Installable")
+
 ### Data Files
 - `config.json`: Stores API key and saved filter defaults
 - `game_modes.json`: Maps game mode IDs (e.g., 72000009) to human-readable names
@@ -156,6 +180,7 @@ Vanilla HTML/CSS/JS with no build step. Frontend sends heartbeat every 30s to ke
 | `/` | GET | Serve main page (requires auth) |
 | `/login` | GET/POST | Login page |
 | `/logout` | GET | Clear session |
+| `/manifest.json` | GET | PWA manifest |
 | `/api/tournaments` | GET | Fetch and filter tournaments |
 | `/api/game-modes` | GET | Get game mode ID → name mapping |
 | `/api/config` | GET/POST | Read/save API key and filter defaults |
