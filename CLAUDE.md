@@ -98,6 +98,30 @@ Flask server with these key components:
 ### Frontend (`templates/index.html`, `static/app.js`, `static/style.css`)
 Vanilla HTML/CSS/JS with no build step. Frontend sends heartbeat every 30s to keep server alive.
 
+**UI Theme (January 2026):**
+- Dark gaming aesthetic with Clash Royale-inspired colors
+- Color palette: Deep purple (`#1a1a2e`), gold (`#f4d03f`), electric blue (`#00d4ff`)
+- Glassmorphism cards with `backdrop-filter: blur(12px)`
+- Google Fonts: Inter (UI), JetBrains Mono (code/tags)
+
+**Filter Components:**
+- Pill buttons for game mode selection (replaces multi-select dropdown)
+- Toggle button group for level cap (11-16)
+- Filter count badge on search button
+- "Clear Filters" ghost button
+
+**Results Display:**
+- Desktop: Enhanced table with styled status badges
+- Mobile (< 768px): Card-based layout with time progress bars
+- Staggered fade-in animations for results
+- Pulsing dot indicator for "In Progress" tournaments
+
+**Animations:**
+- Entrance: `fadeInUp` for cards, `fadeInDown` for header
+- Buttons: scale + glow on hover
+- Toast: slide-up with bounce easing
+- Status badges: pulse animation for active tournaments
+
 ### Data Files
 - `config.json`: Stores API key and saved filter defaults
 - `game_modes.json`: Maps game mode IDs (e.g., 72000009) to human-readable names
