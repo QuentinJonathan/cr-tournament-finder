@@ -4,6 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CR Tournament Finder</title>
+    <meta name="description" content="Find and filter Clash Royale tournaments by game mode, level cap, and time remaining">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -61,25 +65,23 @@
                     </select>
                 </div>
 
-                <div class="filter-group">
-                    <label for="game-mode">Game Mode</label>
-                    <select id="game-mode" multiple>
+                <div class="filter-group" style="grid-column: 1 / -1;">
+                    <label>Game Mode</label>
+                    <div id="game-mode-pills" class="pill-group">
                         <!-- Populated by JS -->
-                    </select>
-                    <small>Ctrl/Cmd+click for multiple</small>
+                    </div>
                 </div>
 
                 <div class="filter-group">
-                    <label for="level-cap">Level Cap</label>
-                    <select id="level-cap" multiple>
-                        <option value="11">11</option>
-                        <option value="12">12</option>
-                        <option value="13">13</option>
-                        <option value="14">14</option>
-                        <option value="15">15</option>
-                        <option value="16">16</option>
-                    </select>
-                    <small>Ctrl/Cmd+click for multiple</small>
+                    <label>Level Cap</label>
+                    <div id="level-cap-toggles" class="toggle-group">
+                        <button type="button" class="toggle-btn" data-value="11">11</button>
+                        <button type="button" class="toggle-btn" data-value="12">12</button>
+                        <button type="button" class="toggle-btn" data-value="13">13</button>
+                        <button type="button" class="toggle-btn" data-value="14">14</button>
+                        <button type="button" class="toggle-btn" data-value="15">15</button>
+                        <button type="button" class="toggle-btn" data-value="16">16</button>
+                    </div>
                 </div>
 
                 <div class="filter-group">
@@ -104,11 +106,12 @@
             </div>
 
             <div class="filter-actions">
+                <button id="clear-filters-btn" class="btn ghost">Clear Filters</button>
                 <button id="search-btn" class="btn primary large">
-                    <span class="btn-text">🔍 Search Tournaments</span>
+                    <span class="btn-text">Search Tournaments<span id="filter-badge" class="filter-badge hidden">0</span></span>
                     <span class="btn-loading hidden">
                         <span class="spinner"></span>
-                        Fetching...
+                        Searching...
                     </span>
                 </button>
                 <button id="save-defaults-btn" class="btn secondary">Save as Defaults</button>
@@ -121,7 +124,9 @@
         <!-- Results -->
         <div id="results-section" class="card hidden">
             <h2>Results <span id="results-count"></span></h2>
-            <div class="table-container">
+
+            <!-- Desktop Table -->
+            <div class="table-container desktop-only">
                 <table id="results-table">
                     <thead>
                         <tr>
@@ -139,6 +144,11 @@
                         <!-- Populated by JS -->
                     </tbody>
                 </table>
+            </div>
+
+            <!-- Mobile Cards -->
+            <div id="results-cards" class="results-cards mobile-only">
+                <!-- Populated by JS -->
             </div>
         </div>
 

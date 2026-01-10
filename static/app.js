@@ -15,10 +15,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const filtersSection = document.getElementById('filters-section');
     const searchBtn = document.getElementById('search-btn');
     const saveDefaultsBtn = document.getElementById('save-defaults-btn');
+    const clearFiltersBtn = document.getElementById('clear-filters-btn');
+    const filterBadge = document.getElementById('filter-badge');
     const statusMessage = document.getElementById('status-message');
     const resultsSection = document.getElementById('results-section');
     const resultsCount = document.getElementById('results-count');
     const resultsBody = document.getElementById('results-body');
+    const resultsCards = document.getElementById('results-cards');
     const toast = document.getElementById('toast');
     const shutdownBtn = document.getElementById('shutdown-btn');
 
@@ -38,8 +41,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Filter elements
     const tournamentType = document.getElementById('tournament-type');
     const statusFilter = document.getElementById('status');
-    const gameModeSelect = document.getElementById('game-mode');
-    const levelCapSelect = document.getElementById('level-cap');
+    const gameModePills = document.getElementById('game-mode-pills');
+    const levelCapToggles = document.getElementById('level-cap-toggles');
     const minPlayers = document.getElementById('min-players');
     const maxPlayers = document.getElementById('max-players');
     const minRemaining = document.getElementById('min-remaining');
@@ -53,9 +56,32 @@ document.addEventListener('DOMContentLoaded', () => {
     init();
 
     async function init() {
-        await loadConfig();
         await loadGameModes();
+        await loadConfig();
+        setupEventListeners();
         startHeartbeat();
+        updateFilterBadge();
+    }
+
+    function setupEventListeners() {
+        // Level cap toggle buttons
+        levelCapToggles.querySelectorAll('.toggle-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                btn.classList.toggle('active');
+                updateFilterBadge();
+            });
+        });
+
+        // Clear filters
+        clearFiltersBtn.addEventListener('click', clearAllFilters);
+
+        // Update badge on filter changes
+        tournamentType.addEventListener('change', updateFilterBadge);
+        statusFilter.addEventListener('change', updateFilterBadge);
+        minPlayers.addEventListener('input', updateFilterBadge);
+        maxPlayers.addEventListener('input', updateFilterBadge);
+        minRemaining.addEventListener('input', updateFilterBadge);
+        maxRemaining.addEventListener('input', updateFilterBadge);
     }
 
     function startHeartbeat() {
@@ -119,15 +145,25 @@ document.addEventListener('DOMContentLoaded', () => {
             const modes = await resp.json();
 
             gameModeNames = modes; // Cache for debug display
-            gameModeSelect.innerHTML = '';
-            for (const [id, name] of Object.entries(modes)) {
-                const option = document.createElement('option');
-                option.value = id;
-                option.textContent = name;
-                gameModeSelect.appendChild(option);
-            }
+            renderGameModePills(modes);
         } catch (err) {
             console.error('Failed to load game modes:', err);
+        }
+    }
+
+    function renderGameModePills(modes) {
+        gameModePills.innerHTML = '';
+        for (const [id, name] of Object.entries(modes)) {
+            const pill = document.createElement('button');
+            pill.type = 'button';
+            pill.className = 'pill';
+            pill.dataset.value = id;
+            pill.textContent = name;
+            pill.addEventListener('click', () => {
+                pill.classList.toggle('active');
+                updateFilterBadge();
+            });
+            gameModePills.appendChild(pill);
         }
     }
 
@@ -150,29 +186,83 @@ document.addEventListener('DOMContentLoaded', () => {
         if (filters.max_remaining_minutes) {
             maxRemaining.value = filters.max_remaining_minutes;
         }
+        // Game mode pills
         if (filters.game_modes && filters.game_modes.length) {
-            Array.from(gameModeSelect.options).forEach(opt => {
-                opt.selected = filters.game_modes.includes(opt.value);
+            gameModePills.querySelectorAll('.pill').forEach(pill => {
+                if (filters.game_modes.includes(pill.dataset.value)) {
+                    pill.classList.add('active');
+                }
             });
         }
+        // Level cap toggles
         if (filters.level_caps && filters.level_caps.length) {
-            Array.from(levelCapSelect.options).forEach(opt => {
-                opt.selected = filters.level_caps.includes(opt.value);
+            levelCapToggles.querySelectorAll('.toggle-btn').forEach(btn => {
+                if (filters.level_caps.includes(btn.dataset.value)) {
+                    btn.classList.add('active');
+                }
             });
         }
+        updateFilterBadge();
     }
 
     function getFilters() {
         return {
             tournament_type: tournamentType.value,
             status: statusFilter.value,
-            game_modes: Array.from(gameModeSelect.selectedOptions).map(o => o.value),
-            level_caps: Array.from(levelCapSelect.selectedOptions).map(o => o.value),
+            game_modes: Array.from(gameModePills.querySelectorAll('.pill.active'))
+                .map(p => p.dataset.value),
+            level_caps: Array.from(levelCapToggles.querySelectorAll('.toggle-btn.active'))
+                .map(b => b.dataset.value),
             min_players: parseInt(minPlayers.value) || 0,
             max_players: parseInt(maxPlayers.value) || null,
             min_remaining_minutes: parseInt(minRemaining.value) || 0,
             max_remaining_minutes: parseInt(maxRemaining.value) || null
         };
+    }
+
+    function countActiveFilters() {
+        let count = 0;
+        // Tournament type (if not default)
+        if (tournamentType.value !== 'open') count++;
+        // Status (if not default)
+        if (statusFilter.value !== 'all') count++;
+        // Game modes
+        count += gameModePills.querySelectorAll('.pill.active').length;
+        // Level caps
+        count += levelCapToggles.querySelectorAll('.toggle-btn.active').length;
+        // Player filters
+        if (parseInt(minPlayers.value) > 0) count++;
+        if (maxPlayers.value) count++;
+        // Time filters
+        if (parseInt(minRemaining.value) > 0) count++;
+        if (maxRemaining.value) count++;
+        return count;
+    }
+
+    function updateFilterBadge() {
+        const count = countActiveFilters();
+        if (count > 0) {
+            filterBadge.textContent = count;
+            filterBadge.classList.remove('hidden');
+        } else {
+            filterBadge.classList.add('hidden');
+        }
+    }
+
+    function clearAllFilters() {
+        // Reset dropdowns
+        tournamentType.value = 'open';
+        statusFilter.value = 'all';
+        // Reset pills
+        gameModePills.querySelectorAll('.pill.active').forEach(p => p.classList.remove('active'));
+        // Reset toggles
+        levelCapToggles.querySelectorAll('.toggle-btn.active').forEach(b => b.classList.remove('active'));
+        // Reset number inputs
+        minPlayers.value = '0';
+        maxPlayers.value = '';
+        minRemaining.value = '0';
+        maxRemaining.value = '';
+        updateFilterBadge();
     }
 
     function showStatus(message, type) {
@@ -188,8 +278,10 @@ document.addEventListener('DOMContentLoaded', () => {
     function showToast(message) {
         toast.textContent = message;
         toast.classList.remove('hidden');
+        toast.classList.add('show');
         setTimeout(() => {
-            toast.classList.add('hidden');
+            toast.classList.remove('show');
+            setTimeout(() => toast.classList.add('hidden'), 400);
         }, 2000);
     }
 
@@ -215,7 +307,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         setLoading(true);
-        showStatus('Fetching tournaments... This may take a few seconds.', 'loading');
+        showStatus('Searching tournaments... This may take a few seconds.', 'loading');
 
         try {
             const filters = getFilters();
@@ -261,40 +353,34 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (tournaments.length === 0) {
             resultsBody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-secondary); padding: 32px;">No tournaments found matching your filters</td></tr>';
+            resultsCards.innerHTML = '<div class="empty-state"><p>No tournaments found matching your filters</p></div>';
             resultsSection.classList.remove('hidden');
             resultsCount.textContent = '';
             return;
         }
 
         resultsCount.textContent = `(${tournaments.length})`;
+
+        // Desktop table
+        displayTableResults(tournaments);
+
+        // Mobile cards
+        displayCardResults(tournaments);
+
+        resultsSection.classList.remove('hidden');
+    }
+
+    function displayTableResults(tournaments) {
         resultsBody.innerHTML = '';
 
         tournaments.forEach(t => {
             const tr = document.createElement('tr');
 
             // Format remaining time
-            let timeLeft = '—';
-            if (t.remainingMinutes !== null) {
-                if (t.remainingMinutes < 60) {
-                    timeLeft = `${t.remainingMinutes} min`;
-                } else {
-                    const hours = Math.floor(t.remainingMinutes / 60);
-                    const mins = t.remainingMinutes % 60;
-                    timeLeft = `${hours}h ${mins}m`;
-                }
-            }
+            const timeLeft = formatTime(t.remainingMinutes);
 
             // Format elapsed time (running for)
-            let elapsed = '—';
-            if (t.elapsedMinutes !== null && t.elapsedMinutes !== undefined) {
-                if (t.elapsedMinutes < 60) {
-                    elapsed = `${t.elapsedMinutes} min`;
-                } else {
-                    const hours = Math.floor(t.elapsedMinutes / 60);
-                    const mins = t.elapsedMinutes % 60;
-                    elapsed = `${hours}h ${mins}m`;
-                }
-            }
+            const elapsed = formatTime(t.elapsedMinutes);
 
             // Status badge
             const statusClass = t.status === 'inProgress' ? 'in-progress' : 'in-preparation';
@@ -313,8 +399,73 @@ document.addEventListener('DOMContentLoaded', () => {
 
             resultsBody.appendChild(tr);
         });
+    }
 
-        resultsSection.classList.remove('hidden');
+    function displayCardResults(tournaments) {
+        resultsCards.innerHTML = '';
+
+        tournaments.forEach((t, index) => {
+            const card = document.createElement('div');
+            card.className = 'result-card';
+            card.style.animationDelay = `${Math.min(index * 0.05, 0.5)}s`;
+
+            const timeLeft = formatTime(t.remainingMinutes);
+            const timePercent = calculateTimePercent(t);
+            const timeClass = timePercent < 20 ? 'low' : timePercent < 50 ? 'medium' : '';
+
+            const statusClass = t.status === 'inProgress' ? 'in-progress' : 'in-preparation';
+            const statusText = t.status === 'inProgress' ? 'In Progress' : 'Preparation';
+
+            card.innerHTML = `
+                <div class="result-card-header">
+                    <span class="result-card-name">${escapeHtml(t.name)}</span>
+                    <span class="result-card-mode">${escapeHtml(t.gameMode)}</span>
+                </div>
+                <div class="result-card-stats">
+                    <div class="result-card-stat">
+                        <div class="result-card-stat-value">${t.players}/${t.maxPlayers}</div>
+                        <div class="result-card-stat-label">Players</div>
+                    </div>
+                    <div class="result-card-stat">
+                        <div class="result-card-stat-value">${t.levelCap}</div>
+                        <div class="result-card-stat-label">Level Cap</div>
+                    </div>
+                    <div class="result-card-stat">
+                        <div class="result-card-stat-value">${timeLeft}</div>
+                        <div class="result-card-stat-label">Time Left</div>
+                    </div>
+                </div>
+                <div class="time-progress">
+                    <div class="time-progress-bar ${timeClass}" style="width: ${timePercent}%"></div>
+                </div>
+                <div class="result-card-footer">
+                    <span class="status-badge ${statusClass}">${statusText}</span>
+                    <button class="result-card-tag" data-tag="${escapeHtml(t.tag)}">${escapeHtml(t.tag)}</button>
+                </div>
+            `;
+
+            resultsCards.appendChild(card);
+        });
+    }
+
+    function formatTime(minutes) {
+        if (minutes === null || minutes === undefined) return '—';
+        if (minutes < 60) {
+            return `${minutes}m`;
+        } else {
+            const hours = Math.floor(minutes / 60);
+            const mins = minutes % 60;
+            return `${hours}h ${mins}m`;
+        }
+    }
+
+    function calculateTimePercent(tournament) {
+        // Estimate: assume max tournament duration is 60 minutes
+        // If we have remaining time, calculate percentage
+        if (tournament.remainingMinutes === null) return 100;
+        const maxDuration = 60; // minutes
+        const percent = (tournament.remainingMinutes / maxDuration) * 100;
+        return Math.min(100, Math.max(0, percent));
     }
 
     function escapeHtml(text) {
@@ -408,7 +559,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 await fetch('/api/shutdown', { method: 'POST' });
                 showToast('Server shutting down...');
                 setTimeout(() => {
-                    document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;color:#666;"><div style="text-align:center;"><h2>Server stopped</h2><p>You can close this tab.</p></div></div>';
+                    document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:Inter,system-ui;color:#a0a0b0;background:#0d0d1a;"><div style="text-align:center;"><h2 style="color:#f4d03f;">Server stopped</h2><p>You can close this tab.</p></div></div>';
                 }, 500);
             } catch (err) {
                 showToast('Server stopped');
@@ -430,10 +581,18 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key === 'Enter') saveApiKey();
     });
 
-    // Click to copy tag
+    // Click to copy tag (desktop table)
     resultsBody.addEventListener('click', (e) => {
         if (e.target.classList.contains('tag-cell')) {
             copyTag(e.target.dataset.tag);
+        }
+    });
+
+    // Click to copy tag (mobile cards)
+    resultsCards.addEventListener('click', (e) => {
+        const tagBtn = e.target.closest('.result-card-tag');
+        if (tagBtn) {
+            copyTag(tagBtn.dataset.tag);
         }
     });
 
