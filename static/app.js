@@ -386,6 +386,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const statusClass = t.status === 'inProgress' ? 'in-progress' : 'in-preparation';
             const statusText = t.status === 'inProgress' ? 'In Progress' : 'Preparation';
 
+            // Join URL
+            const joinUrl = getTournamentJoinUrl(t.tag);
+            const isPasswordProtected = t.type === 'passwordProtected';
+            const lockIcon = isPasswordProtected ? '<span class="lock-icon" title="Password required">&#128274;</span>' : '';
+
             tr.innerHTML = `
                 <td>${escapeHtml(t.name)}</td>
                 <td>${escapeHtml(t.gameMode)}</td>
@@ -395,6 +400,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <td>${elapsed}</td>
                 <td>${timeLeft}</td>
                 <td class="tag-cell" data-tag="${escapeHtml(t.tag)}">${escapeHtml(t.tag)}</td>
+                <td><a href="${joinUrl}" target="_blank" rel="noopener" class="join-btn">${lockIcon}Join</a></td>
             `;
 
             resultsBody.appendChild(tr);
@@ -415,6 +421,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const statusClass = t.status === 'inProgress' ? 'in-progress' : 'in-preparation';
             const statusText = t.status === 'inProgress' ? 'In Progress' : 'Preparation';
+
+            // Join URL
+            const joinUrl = getTournamentJoinUrl(t.tag);
+            const isPasswordProtected = t.type === 'passwordProtected';
+            const lockIcon = isPasswordProtected ? '<span class="lock-icon" title="Password required">&#128274;</span>' : '';
 
             card.innerHTML = `
                 <div class="result-card-header">
@@ -440,7 +451,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>
                 <div class="result-card-footer">
                     <span class="status-badge ${statusClass}">${statusText}</span>
-                    <button class="result-card-tag" data-tag="${escapeHtml(t.tag)}">${escapeHtml(t.tag)}</button>
+                    <div class="result-card-actions">
+                        <button class="result-card-tag" data-tag="${escapeHtml(t.tag)}">${escapeHtml(t.tag)}</button>
+                        <a href="${joinUrl}" target="_blank" rel="noopener" class="join-btn-mobile">${lockIcon}Join</a>
+                    </div>
                 </div>
             `;
 
@@ -472,6 +486,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    function getTournamentJoinUrl(tag) {
+        // Remove # prefix if present and construct deep link URL
+        const cleanTag = tag.replace('#', '');
+        return `https://link.clashroyale.com/en?clashroyale://joinTournament?id=${cleanTag}`;
     }
 
     async function copyTag(tag) {

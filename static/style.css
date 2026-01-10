@@ -792,6 +792,63 @@ tbody tr:last-child td {
     background: rgba(0, 212, 255, 0.2);
 }
 
+.result-card-actions {
+    display: flex;
+    gap: var(--space-xs);
+    align-items: center;
+}
+
+/* ========================================
+   JOIN BUTTONS
+   ======================================== */
+.join-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px;
+    background: rgba(244, 208, 63, 0.15);
+    color: var(--gold-primary);
+    border: 1px solid rgba(244, 208, 63, 0.3);
+    border-radius: var(--radius-sm);
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: all var(--transition-fast);
+    cursor: pointer;
+}
+
+.join-btn:hover {
+    background: rgba(244, 208, 63, 0.25);
+    box-shadow: var(--glow-gold);
+    transform: translateY(-1px);
+}
+
+.join-btn-mobile {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 16px;
+    background: var(--gradient-gold);
+    color: var(--bg-primary);
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: 0.875rem;
+    font-weight: 700;
+    text-decoration: none;
+    transition: all var(--transition-fast);
+    cursor: pointer;
+}
+
+.join-btn-mobile:hover {
+    box-shadow: var(--glow-gold);
+    transform: translateY(-1px);
+}
+
+.lock-icon {
+    font-size: 0.75rem;
+    opacity: 0.9;
+}
+
 /* ========================================
    SKELETON LOADERS
    ======================================== */

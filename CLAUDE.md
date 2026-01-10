@@ -129,6 +129,9 @@ Vanilla HTML/CSS/JS with no build step. Frontend sends heartbeat every 30s to ke
 - Mobile (< 768px): Card-based layout with time progress bars
 - Staggered fade-in animations for results
 - Pulsing dot indicator for "In Progress" tournaments
+- **Join buttons**: One-click deep links to join tournaments directly in Clash Royale app
+  - Gold-accented styling to stand out
+  - Lock icon for password-protected tournaments (password required in-game)
 
 **Animations:**
 - Entrance: `fadeInUp` for cards, `fadeInDown` for header
@@ -169,3 +172,9 @@ Vanilla HTML/CSS/JS with no build step. Frontend sends heartbeat every 30s to ke
 - Tournament statuses: `inPreparation`, `inProgress`, `ended`
 - Time format: `YYYYMMDDTHHmmss.sssZ` (e.g., `20260105T220549.000Z`)
 - Tags must be URL-encoded (# → %23) when used in URLs
+
+### Deep Links (Join Tournament)
+- Format: `https://link.clashroyale.com/en?clashroyale://joinTournament?id=TAG`
+- TAG should be without the `#` prefix (e.g., `2PQGYYGY` not `#2PQGYYGY`)
+- Opens Clash Royale app directly to the tournament join screen
+- Password-protected tournaments: link works but password must be entered in-game
