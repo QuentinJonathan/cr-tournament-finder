@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
-from flask import Flask, render_template, jsonify, request, session, redirect, url_for
+from flask import Flask, render_template, jsonify, request, session, redirect, url_for, send_from_directory
 from functools import wraps
 import secrets
 import requests as http_requests
@@ -532,6 +532,12 @@ def logout():
 def index():
     """Serve main page"""
     return render_template('index.html')
+
+
+@app.route('/manifest.json')
+def manifest():
+    """Serve PWA manifest"""
+    return send_from_directory(BASE_DIR, 'manifest.json', mimetype='application/manifest+json')
 
 
 @app.route('/api/tournaments')
