@@ -31,6 +31,9 @@ The app runs at `http://localhost:5050`.
 
 #### Deployment (from local machine, not GitHub)
 ```bash
+# If gcloud is not in PATH, use full path (Homebrew install):
+# /opt/homebrew/share/google-cloud-sdk/bin/gcloud
+
 # Run from project root directory
 gcloud run deploy cr-tournament-finder \
   --source . \
@@ -57,6 +60,17 @@ gcloud run deploy cr-tournament-finder \
 - Cold start ~5-10s when idle
 - **No auto-deploy**: Code is uploaded from local machine via `--source .`, not pulled from GitHub
 - Redeploy manually after code changes by running the deployment command above
+
+#### Finding gcloud CLI (Homebrew)
+If `gcloud` command is not found after installing via `brew install google-cloud-sdk`:
+```bash
+# Full path (Homebrew on Apple Silicon):
+/opt/homebrew/share/google-cloud-sdk/bin/gcloud
+
+# Add to PATH permanently (add to ~/.zshrc):
+source "/opt/homebrew/share/google-cloud-sdk/path.zsh.inc"
+source "/opt/homebrew/share/google-cloud-sdk/completion.zsh.inc"
+```
 
 ### Backup: Render.com
 
