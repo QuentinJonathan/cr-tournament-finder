@@ -60,6 +60,7 @@ gcloud run deploy cr-tournament-finder \
 - Cold start ~5-10s when idle
 - **No auto-deploy**: Code is uploaded from local machine via `--source .`, not pulled from GitHub
 - Redeploy manually after code changes by running the deployment command above
+- **PWA cache**: If changing `style.css` or `app.js`, bump `CACHE_NAME` in `static/service-worker.js` (see PWA section)
 
 #### Finding gcloud CLI (Homebrew)
 If `gcloud` command is not found after installing via `brew install google-cloud-sdk`:
@@ -162,6 +163,26 @@ The app is installable as a standalone app on mobile and desktop.
 **Testing:**
 - Chrome DevTools → Application → Manifest (check for errors)
 - Lighthouse → PWA audit (should show "Installable")
+
+**Cache Invalidation (IMPORTANT for deployments):**
+
+When deploying changes to static assets (`style.css`, `app.js`), you MUST bump the cache version in `static/service-worker.js`:
+
+```javascript
+// Change this version number (e.g., v2 → v3)
+const CACHE_NAME = 'cr-finder-v2';
+```
+
+Why: The service worker uses cache-first for static assets. Without bumping the version:
+- Users keep seeing old cached CSS/JS
+- Changes won't appear until they manually clear browser data
+
+The version bump triggers:
+1. Browser detects service worker file changed
+2. New service worker installs with new cache name
+3. `skipWaiting()` activates it immediately
+4. Old cache gets deleted automatically
+5. Fresh assets are fetched and cached
 
 ### Data Files
 - `config.json`: Stores API key and saved filter defaults
