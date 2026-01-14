@@ -71,6 +71,12 @@
     --transition-normal: 250ms ease;
     --transition-slow: 400ms ease;
     --transition-bounce: 400ms cubic-bezier(0.68, -0.55, 0.265, 1.55);
+
+    /* Safe Area Insets (for notched devices) */
+    --safe-area-top: env(safe-area-inset-top, 0px);
+    --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-area-left: env(safe-area-inset-left, 0px);
+    --safe-area-right: env(safe-area-inset-right, 0px);
 }
 
 /* ========================================
@@ -105,12 +111,15 @@ body::before {
         radial-gradient(ellipse at 50% 100%, rgba(244, 208, 63, 0.04) 0%, transparent 40%);
     pointer-events: none;
     z-index: -1;
+    will-change: transform;
 }
 
 .container {
     max-width: 1200px;
     margin: 0 auto;
     padding: var(--space-lg);
+    padding-left: calc(var(--space-lg) + var(--safe-area-left));
+    padding-right: calc(var(--space-lg) + var(--safe-area-right));
     position: relative;
 }
 
@@ -136,7 +145,7 @@ header {
 }
 
 header h1 {
-    font-size: 2.25rem;
+    font-size: clamp(1.5rem, 4vw, 2.25rem);
     font-weight: 700;
     margin-bottom: var(--space-xs);
     background: var(--gradient-gold);
@@ -582,6 +591,20 @@ td {
     color: var(--text-primary);
 }
 
+/* Numeric columns right-aligned for better readability */
+td:nth-child(4),
+td:nth-child(5),
+td:nth-child(6) {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+th:nth-child(4),
+th:nth-child(5),
+th:nth-child(6) {
+    text-align: right;
+}
+
 tbody tr {
     transition: background var(--transition-fast);
 }
@@ -884,7 +907,7 @@ tbody tr:last-child td {
    ======================================== */
 .toast {
     position: fixed;
-    bottom: var(--space-lg);
+    bottom: calc(var(--space-lg) + var(--safe-area-bottom));
     left: 50%;
     transform: translateX(-50%) translateY(100px);
     background: var(--bg-secondary);
@@ -1271,8 +1294,10 @@ tbody tr:last-child td {
     .desktop-only { display: none; }
     .mobile-only { display: block; }
 
-    header h1 {
-        font-size: 1.75rem;
+    /* Simplify background on mobile for better performance */
+    body::before {
+        background-image:
+            radial-gradient(ellipse at 20% 30%, rgba(155, 89, 182, 0.05) 0%, transparent 50%);
     }
 
     .btn-shutdown {
@@ -1345,6 +1370,15 @@ tbody tr:last-child td {
     th, td {
         padding: 10px 12px;
     }
+
+    /* Full-width inputs on mobile */
+    input[type="number"] {
+        max-width: 100%;
+    }
+
+    #api-key-section .input-group {
+        max-width: 100%;
+    }
 }
 
 /* ========================================
@@ -1355,12 +1389,9 @@ tbody tr:last-child td {
         padding: var(--space-sm);
     }
 
-    header h1 {
-        font-size: 1.5rem;
-    }
-
+    /* Use 2-column grid on very small screens */
     .toggle-group {
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(2, 1fr);
     }
 
     .result-card-stats {
@@ -1375,5 +1406,27 @@ tbody tr:last-child td {
 
     .tag-search-input {
         flex-direction: column;
+    }
+}
+
+/* ========================================
+   RESPONSIVE - LANDSCAPE MOBILE
+   ======================================== */
+@media (max-width: 896px) and (orientation: landscape) {
+    .container {
+        padding: var(--space-sm) var(--space-md);
+    }
+
+    header {
+        margin-bottom: var(--space-md);
+    }
+
+    .card {
+        padding: var(--space-sm) var(--space-md);
+        margin-bottom: var(--space-sm);
+    }
+
+    .filters-grid {
+        gap: var(--space-sm);
     }
 }
