@@ -11,6 +11,193 @@ if ('serviceWorker' in navigator) {
         });
 }
 
+// ===========================================
+// CLIENT-SIDE FILTERING STATE
+// ===========================================
+let allTournaments = [];  // Cached tournament data from API
+let fetchedAt = null;     // Timestamp of last fetch (ISO string)
+let isSearching = false;  // Prevent concurrent searches
+
+// ===========================================
+// TIME PARSING & CALCULATION FUNCTIONS
+// ===========================================
+
+/**
+ * Parse CR API time format: 20260105T220549.000Z
+ * @param {string} timeStr - Time string from API
+ * @returns {Date|null} - Parsed Date object or null
+ */
+function parseCrTime(timeStr) {
+    if (!timeStr) return null;
+    try {
+        // Format: YYYYMMDDTHHmmss.sssZ
+        const year = timeStr.substring(0, 4);
+        const month = timeStr.substring(4, 6);
+        const day = timeStr.substring(6, 8);
+        const hour = timeStr.substring(9, 11);
+        const minute = timeStr.substring(11, 13);
+        const second = timeStr.substring(13, 15);
+        const ms = timeStr.substring(16, 19);
+        return new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}.${ms}Z`);
+    } catch (e) {
+        return null;
+    }
+}
+
+/**
+ * Calculate remaining minutes for a tournament
+ * Uses startedTime if available (from detail API), otherwise falls back to estimated start time
+ * @param {Object} tournament - Tournament object with time fields
+ * @returns {number|null} - Remaining minutes or null
+ */
+function calcRemainingMinutes(tournament) {
+    const now = Date.now();
+    const status = tournament.status;
+    const duration = tournament.duration || 0;
+
+    // Ended tournaments have 0 remaining
+    if (status === 'ended') {
+        return 0;
+    }
+
+    // For inProgress tournaments, use actual startedTime if available
+    if (status === 'inProgress') {
+        const started = parseCrTime(tournament.startedTime);
+        if (started) {
+            const endTime = started.getTime() + (duration * 1000);
+            const remainingSec = (endTime - now) / 1000;
+            return Math.max(0, Math.floor(remainingSec / 60));
+        }
+    }
+
+    // Fallback: use estimated time (createdTime + preparationDuration)
+    const created = parseCrTime(tournament.createdTime);
+    if (!created) {
+        return null;
+    }
+
+    const prepDuration = tournament.preparationDuration || 0;
+    const estimatedStart = created.getTime() + (prepDuration * 1000);
+    const endTime = estimatedStart + (duration * 1000);
+
+    const remainingSec = (endTime - now) / 1000;
+    return Math.max(0, Math.floor(remainingSec / 60));
+}
+
+/**
+ * Calculate elapsed minutes since tournament started
+ * @param {Object} tournament - Tournament object with time fields
+ * @returns {number|null} - Elapsed minutes or null
+ */
+function calcElapsedMinutes(tournament) {
+    if (tournament.status !== 'inProgress') {
+        return null;
+    }
+
+    const now = Date.now();
+
+    // Prefer actual startedTime from detail API
+    const started = parseCrTime(tournament.startedTime);
+    if (started) {
+        const elapsedSec = (now - started.getTime()) / 1000;
+        return Math.max(0, Math.floor(elapsedSec / 60));
+    }
+
+    // Fallback: use estimated start time
+    const created = parseCrTime(tournament.createdTime);
+    if (!created) {
+        return null;
+    }
+
+    const prepDuration = tournament.preparationDuration || 0;
+    const estimatedStart = created.getTime() + (prepDuration * 1000);
+    const elapsedSec = (now - estimatedStart) / 1000;
+
+    return Math.max(0, Math.floor(elapsedSec / 60));
+}
+
+/**
+ * Filter tournaments client-side
+ * @param {Array} tournaments - Array of tournament objects
+ * @param {Object} filters - Filter criteria
+ * @returns {Array} - Filtered and sorted tournaments
+ */
+function filterTournamentsClientSide(tournaments, filters) {
+    let filtered = tournaments.filter(t => {
+        // Tournament type filter
+        const tType = filters.tournament_type || 'all';
+        if (tType !== 'all') {
+            if (tType === 'open' && t.type !== 'open') return false;
+            if (tType === 'password' && t.type !== 'passwordProtected') return false;
+        }
+
+        // Status filter
+        const status = filters.status || 'all';
+        if (status !== 'all') {
+            if (status === 'inProgress' && t.status !== 'inProgress') return false;
+            if (status === 'inPreparation' && t.status !== 'inPreparation') return false;
+        }
+
+        // Game mode filter
+        const gameModes = filters.game_modes || [];
+        if (gameModes.length > 0) {
+            if (!gameModes.includes(t.gameModeId)) return false;
+        }
+
+        // Level cap filter
+        const levelCaps = filters.level_caps || [];
+        if (levelCaps.length > 0) {
+            if (!levelCaps.includes(String(t.levelCap))) return false;
+        }
+
+        // Player count filters
+        const currentPlayers = t.players || 0;
+        const minPlayers = filters.min_players || 0;
+        const maxPlayers = filters.max_players;
+
+        if (currentPlayers < minPlayers) return false;
+        if (maxPlayers && currentPlayers > maxPlayers) return false;
+
+        // Time filters
+        const remaining = calcRemainingMinutes(t);
+        const minRemaining = filters.min_remaining_minutes || 0;
+        const maxRemaining = filters.max_remaining_minutes;
+
+        if (remaining !== null) {
+            if (remaining < minRemaining) return false;
+            if (maxRemaining && remaining > maxRemaining) return false;
+        }
+
+        return true;
+    });
+
+    // Add computed time fields and sort
+    filtered = filtered.map(t => ({
+        ...t,
+        remainingMinutes: calcRemainingMinutes(t),
+        elapsedMinutes: calcElapsedMinutes(t),
+        gameMode: t.gameModeName
+    }));
+
+    // Sort by remaining time, then by player count
+    filtered.sort((a, b) => {
+        // Null remaining times go to the end
+        if (a.remainingMinutes === null && b.remainingMinutes !== null) return 1;
+        if (a.remainingMinutes !== null && b.remainingMinutes === null) return -1;
+        if (a.remainingMinutes === null && b.remainingMinutes === null) return 0;
+
+        // Sort by remaining time ascending
+        if (a.remainingMinutes !== b.remainingMinutes) {
+            return a.remainingMinutes - b.remainingMinutes;
+        }
+
+        // Then by player count descending
+        return (b.players || 0) - (a.players || 0);
+    });
+
+    return filtered;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     // Elements
     const apiKeySection = document.getElementById('api-key-section');
@@ -46,6 +233,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const refreshLogsBtn = document.getElementById('refresh-logs-btn');
     const logOutput = document.getElementById('log-output');
 
+    // Fetch time indicator elements
+    const fetchTimeIndicator = document.getElementById('fetch-time-indicator');
+    const fetchTimeText = document.getElementById('fetch-time-text');
+    const refreshDataBtn = document.getElementById('refresh-data-btn');
+
     // Game modes cache for debug display
     let gameModeNames = {};
 
@@ -80,19 +272,52 @@ document.addEventListener('DOMContentLoaded', () => {
             btn.addEventListener('click', () => {
                 btn.classList.toggle('active');
                 updateFilterBadge();
+                // Instant filter when data is available
+                if (allTournaments.length > 0) {
+                    applyFiltersAndDisplay();
+                }
             });
         });
 
         // Clear filters
         clearFiltersBtn.addEventListener('click', clearAllFilters);
 
-        // Update badge on filter changes
-        tournamentType.addEventListener('change', updateFilterBadge);
-        statusFilter.addEventListener('change', updateFilterBadge);
-        minPlayers.addEventListener('input', updateFilterBadge);
-        maxPlayers.addEventListener('input', updateFilterBadge);
-        minRemaining.addEventListener('input', updateFilterBadge);
-        maxRemaining.addEventListener('input', updateFilterBadge);
+        // Update badge on filter changes and apply filters instantly
+        tournamentType.addEventListener('change', () => {
+            updateFilterBadge();
+            if (allTournaments.length > 0) {
+                applyFiltersAndDisplay();
+            }
+        });
+        statusFilter.addEventListener('change', () => {
+            updateFilterBadge();
+            if (allTournaments.length > 0) {
+                applyFiltersAndDisplay();
+            }
+        });
+
+        // Debounced filtering for number inputs
+        minPlayers.addEventListener('input', () => {
+            updateFilterBadge();
+            debouncedApplyFilters();
+        });
+        maxPlayers.addEventListener('input', () => {
+            updateFilterBadge();
+            debouncedApplyFilters();
+        });
+        minRemaining.addEventListener('input', () => {
+            updateFilterBadge();
+            debouncedApplyFilters();
+        });
+        maxRemaining.addEventListener('input', () => {
+            updateFilterBadge();
+            debouncedApplyFilters();
+        });
+
+        // Refresh data button
+        if (refreshDataBtn) {
+            refreshDataBtn.addEventListener('click', searchTournaments);
+        }
     }
 
     function startHeartbeat() {
@@ -173,6 +398,10 @@ document.addEventListener('DOMContentLoaded', () => {
             pill.addEventListener('click', () => {
                 pill.classList.toggle('active');
                 updateFilterBadge();
+                // Instant filter when data is available
+                if (allTournaments.length > 0) {
+                    applyFiltersAndDisplay();
+                }
             });
             gameModePills.appendChild(pill);
         }
@@ -274,6 +503,10 @@ document.addEventListener('DOMContentLoaded', () => {
         minRemaining.value = '0';
         maxRemaining.value = '';
         updateFilterBadge();
+        // Re-apply filters to update display
+        if (allTournaments.length > 0) {
+            applyFiltersAndDisplay();
+        }
     }
 
     function showStatus(message, type) {
@@ -317,47 +550,126 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        if (isSearching) {
+            return;
+        }
+
+        isSearching = true;
         setLoading(true);
-        showStatus('Searching tournaments... This may take a few seconds.', 'loading');
+        showStatus('Fetching tournaments... This takes 15-25 seconds.', 'loading');
 
         try {
-            const filters = getFilters();
-            const params = new URLSearchParams();
-
-            params.set('tournament_type', filters.tournament_type);
-            params.set('status', filters.status);
-            params.set('min_players', filters.min_players);
-            if (filters.max_players) params.set('max_players', filters.max_players);
-            params.set('min_remaining_minutes', filters.min_remaining_minutes);
-            if (filters.max_remaining_minutes) params.set('max_remaining_minutes', filters.max_remaining_minutes);
-
-            filters.game_modes.forEach(m => params.append('game_modes', m));
-            filters.level_caps.forEach(l => params.append('level_caps', l));
-
-            const resp = await fetch('/api/tournaments?' + params.toString());
+            const resp = await fetch('/api/tournaments/search');
             const data = await resp.json();
 
             if (data.error) {
                 showStatus('Error: ' + data.error, 'error');
                 resultsSection.classList.add('hidden');
+                hideFetchTimeIndicator();
                 return;
             }
 
-            displayResults(data);
-            showStatus(`Found ${data.total} tournaments (${data.unfilteredTotal} total before filters)`, 'success');
+            // Store fetched data for client-side filtering
+            allTournaments = data.tournaments;
+            fetchedAt = data.fetchedAt;
 
             // Update debug stats
             if (data.stats) {
                 updateDebugStats(data.stats);
             }
 
+            // Apply current filters and display results
+            applyFiltersAndDisplay();
+
+            // Show fetch time indicator
+            updateFetchTimeIndicator();
+
+            // Show toast notification
+            showToast(`Found ${allTournaments.length} tournaments!`);
+
         } catch (err) {
             console.error('Search failed:', err);
             showStatus('Search failed. Check your connection and API key.', 'error');
+            hideFetchTimeIndicator();
         } finally {
             setLoading(false);
+            isSearching = false;
         }
     }
+
+    /**
+     * Apply filters to cached data and display results
+     * Called when filters change (instant, no API call)
+     */
+    function applyFiltersAndDisplay() {
+        if (allTournaments.length === 0) {
+            return;
+        }
+
+        const filters = getFilters();
+        const filtered = filterTournamentsClientSide(allTournaments, filters);
+
+        displayResults({
+            tournaments: filtered,
+            total: filtered.length,
+            unfilteredTotal: allTournaments.length
+        });
+
+        showStatus(`Found ${filtered.length} tournaments (${allTournaments.length} total before filters)`, 'success');
+    }
+
+    /**
+     * Update fetch time indicator
+     */
+    function updateFetchTimeIndicator() {
+        if (!fetchedAt || !fetchTimeIndicator) return;
+
+        const fetchDate = new Date(fetchedAt);
+        const now = new Date();
+        const diffMs = now - fetchDate;
+        const diffMins = Math.floor(diffMs / 60000);
+
+        let timeText;
+        if (diffMins < 1) {
+            timeText = 'just now';
+        } else if (diffMins === 1) {
+            timeText = '1 minute ago';
+        } else if (diffMins < 60) {
+            timeText = `${diffMins} minutes ago`;
+        } else {
+            const hours = Math.floor(diffMins / 60);
+            timeText = hours === 1 ? '1 hour ago' : `${hours} hours ago`;
+        }
+
+        fetchTimeText.textContent = `Data fetched: ${timeText}`;
+        fetchTimeIndicator.classList.remove('hidden');
+    }
+
+    function hideFetchTimeIndicator() {
+        if (fetchTimeIndicator) {
+            fetchTimeIndicator.classList.add('hidden');
+        }
+    }
+
+    // Debounce function for number inputs
+    function debounce(func, wait) {
+        let timeout;
+        return function executedFunction(...args) {
+            const later = () => {
+                clearTimeout(timeout);
+                func(...args);
+            };
+            clearTimeout(timeout);
+            timeout = setTimeout(later, wait);
+        };
+    }
+
+    // Debounced filter application for number inputs
+    const debouncedApplyFilters = debounce(() => {
+        if (allTournaments.length > 0) {
+            applyFiltersAndDisplay();
+        }
+    }, 300);
 
     function displayResults(data) {
         const tournaments = data.tournaments;

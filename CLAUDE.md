@@ -87,8 +87,8 @@ source "/opt/homebrew/share/google-cloud-sdk/completion.zsh.inc"
 | `CR_FINDER_PASSWORD` | Login password for web UI |
 | `FLASK_SECRET_KEY` | Session encryption key (auto-generated) |
 | `FLASK_ENV` | Set to `production` |
-| `SEARCH_WORKERS` | Parallel search threads (default: 10) |
-| `DETAIL_WORKERS` | Parallel detail fetch threads (default: 10) |
+| `SEARCH_WORKERS` | Parallel search threads (default: 25) |
+| `DETAIL_WORKERS` | Parallel detail fetch threads (default: 25) |
 
 ### Shared Deployment Notes
 - Uses RoyaleAPI Proxy (`proxy.royaleapi.dev`) to bypass IP restrictions
@@ -102,16 +102,23 @@ Flask server with these key components:
 
 - **Authentication**: Session-basierte Auth mit 30-Tage Cookie. Passwort über `CR_FINDER_PASSWORD` Env-Var.
 
-- **Tournament Fetching**: `fetch_all_tournaments()` searches all 2-letter combinations (aa-zz = 676 queries) plus common words in parallel via ThreadPoolExecutor. Drills down to 3+ letter queries when hitting the API's ~20 result limit. Deduplicates by tag.
+- **Tournament Fetching**: `fetch_all_tournaments()` searches all 2-letter combinations (aa-zz = 676 queries), single digits (0-9), Cyrillic letters (а-я = 33 queries), plus common words in parallel via ThreadPoolExecutor (25 workers). Drills down to 3+ letter queries when hitting the API's ~20 result limit. Deduplicates by tag.
 
-- **Detail Fetching**: `fetch_tournament_details_batch()` fetches individual tournament details to get accurate `startedTime` (since hosts can start early before the max prep time).
+- **Detail Fetching**: `fetch_tournament_details_batch()` fetches individual tournament details (25 parallel workers) to get accurate `startedTime` (since hosts can start early before the max prep time).
 
 - **Time Calculation**: `calc_remaining_minutes()` and `calc_elapsed_minutes()` use `startedTime` from detail API when available, falling back to estimated time (createdTime + preparationDuration).
 
-- **Filtering**: `filter_tournaments()` applies filters in two phases - non-time filters first (to reduce set), then time filters after detail fetch.
+- **Filtering**: Server-side `filter_tournaments()` for legacy endpoint. Client-side filtering in `app.js` for instant filter updates after initial fetch.
 
 ### Frontend (`templates/index.html`, `static/app.js`, `static/style.css`)
 Vanilla HTML/CSS/JS with no build step. Frontend sends heartbeat every 30s to keep server alive.
+
+**Client-Side Filtering:**
+- Initial search fetches ALL tournaments via `/api/tournaments/search`
+- Results cached in `allTournaments` array
+- Filter changes apply instantly without API calls
+- Time calculations done in JavaScript (`parseCrTime`, `calcRemainingMinutes`, `calcElapsedMinutes`)
+- Fetch time indicator shows data age with refresh button
 
 **UI Theme (January 2026):**
 - Dark gaming aesthetic with Clash Royale-inspired colors
@@ -202,7 +209,8 @@ The version bump triggers:
 | `/login` | GET/POST | Login page |
 | `/logout` | GET | Clear session |
 | `/manifest.json` | GET | PWA manifest |
-| `/api/tournaments` | GET | Fetch and filter tournaments |
+| `/api/tournaments` | GET | Fetch and filter tournaments (legacy, server-side filtering) |
+| `/api/tournaments/search` | GET | Fetch ALL tournaments with raw time fields (for client-side filtering) |
 | `/api/game-modes` | GET | Get game mode ID → name mapping |
 | `/api/config` | GET/POST | Read/save API key and filter defaults |
 | `/api/logs` | GET | Get log file contents (params: `lines`, `search`) |

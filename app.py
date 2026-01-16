@@ -230,7 +230,7 @@ def fetch_tournament_details_batch(tournaments):
 
     tags = [t['tag'] for t in tournaments]
 
-    max_detail_workers = int(os.environ.get('DETAIL_WORKERS', 10))
+    max_detail_workers = int(os.environ.get('DETAIL_WORKERS', 25))
     with ThreadPoolExecutor(max_workers=min(max_detail_workers, len(tags))) as executor:
         details = list(executor.map(fetch_tournament_detail, tags))
 
@@ -275,6 +275,10 @@ def fetch_all_tournaments():
     # Single digits
     queries.extend(list('0123456789'))
 
+    # Cyrillic letters (33) for Russian tournament names
+    cyrillic_letters = 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя'
+    queries.extend(list(cyrillic_letters))
+
     # Common tournament words (improves non-monotonic coverage)
     common_words = [
         'torneo', 'tornei', 'tourno', 'turnie', 'free', 'open', 'join',
@@ -288,7 +292,7 @@ def fetch_all_tournaments():
     to_search = list(queries)
 
     # Reduce workers on low-memory servers (Free tier = 512MB)
-    WORKERS = int(os.environ.get('SEARCH_WORKERS', 10))
+    WORKERS = int(os.environ.get('SEARCH_WORKERS', 25))
 
     while to_search:
         # Dedupe
@@ -611,6 +615,66 @@ def api_tournaments():
         "tournaments": result,
         "total": len(result),
         "unfilteredTotal": unfiltered_total,
+        "stats": {
+            "queries": search_stats['queries_completed'],
+            "drillDowns": search_stats['drill_downs'],
+            "rateLimits": search_stats['rate_limits'],
+            "apiErrors": search_stats['api_errors'],
+            "tournamentsByMode": dict(search_stats['tournaments_by_mode'])
+        }
+    })
+
+
+@app.route('/api/tournaments/search')
+@login_required
+def api_tournaments_search():
+    """Fetch ALL tournaments without filtering - for client-side filtering.
+
+    Returns all tournament data with raw time fields so the client can:
+    1. Cache the results
+    2. Apply filters instantly without new API calls
+    """
+    if not has_api_key():
+        return jsonify({"error": "API key not configured"}), 400
+
+    logger.info("=" * 60)
+    logger.info("=== FETCH ALL TOURNAMENTS (for client-side filtering) ===")
+
+    # Phase 1: Fetch all tournaments (search API)
+    tournaments = fetch_all_tournaments()
+    total_count = len(tournaments)
+
+    # Phase 2: Fetch details for ALL tournaments to get accurate startedTime
+    logger.info(f"Fetching details for {total_count} tournaments...")
+    tournaments = fetch_tournament_details_batch(tournaments)
+
+    # Prepare response with raw time fields
+    result = []
+    for t in tournaments:
+        result.append({
+            "tag": t.get('tag'),
+            "name": t.get('name'),
+            "type": t.get('type'),
+            "status": t.get('status'),
+            "players": t.get('capacity', 0),
+            "maxPlayers": t.get('maxCapacity', 0),
+            "levelCap": t.get('levelCap'),
+            "gameModeId": str(t.get('gameMode', {}).get('id', '')),
+            "gameModeName": get_mode_name(t.get('gameMode', {}).get('id')),
+            # Raw time fields for client-side calculation
+            "createdTime": t.get('createdTime'),
+            "preparationDuration": t.get('preparationDuration', 0),
+            "duration": t.get('duration', 0),
+            "startedTime": t.get('startedTime'),
+            "endedTime": t.get('endedTime')
+        })
+
+    logger.info(f"=== FETCH COMPLETE: {len(result)} tournaments ===")
+
+    return jsonify({
+        "tournaments": result,
+        "total": len(result),
+        "fetchedAt": datetime.now(timezone.utc).isoformat(),
         "stats": {
             "queries": search_stats['queries_completed'],
             "drillDowns": search_stats['drill_downs'],
