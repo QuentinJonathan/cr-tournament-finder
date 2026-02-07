@@ -104,7 +104,13 @@ Flask server with these key components:
 
 - **Tournament Fetching**: `fetch_all_tournaments()` searches all 2-letter combinations (aa-zz = 676 queries), single digits (0-9), Cyrillic letters (а-я = 33 queries), plus common words in parallel via ThreadPoolExecutor (25 workers). Drills down to 3+ letter queries when hitting the API's ~20 result limit. Deduplicates by tag.
 
-- **Detail Fetching**: `fetch_tournament_details_batch()` fetches individual tournament details (25 parallel workers) to get accurate `startedTime` (since hosts can start early before the max prep time).
+- **Caching & Performance Knobs**:
+  - Search results are cached in-memory for `SEARCH_CACHE_TTL_SECONDS` (default: 60s). `/api/tournaments/search?force=1` forces a fresh crawl.
+  - HTTP connection pooling uses per-thread `requests.Session` (env: `HTTP_POOL_MAXSIZE`, default: 50).
+  - Detail responses are cached in-memory for `DETAIL_CACHE_TTL_SECONDS` (default: 300s).
+  - Drill-down depth is configurable: `MAX_QUERY_LEN` (default: 4), `MAX_CYRILLIC_QUERY_LEN` (default: 2).
+
+- **Detail Fetching**: `fetch_tournament_details_batch()` fetches individual tournament details in parallel to get accurate `startedTime` (since hosts can start early before the max prep time). For performance, details are only fetched for `inProgress` tournaments.
 
 - **Time Calculation**: `calc_remaining_minutes()` and `calc_elapsed_minutes()` use `startedTime` from detail API when available, falling back to estimated time (createdTime + preparationDuration).
 
@@ -211,6 +217,7 @@ The version bump triggers:
 | `/manifest.json` | GET | PWA manifest |
 | `/api/tournaments` | GET | Fetch and filter tournaments (legacy, server-side filtering) |
 | `/api/tournaments/search` | GET | Fetch ALL tournaments with raw time fields (for client-side filtering) |
+| `/api/tournaments/search/stream` | GET | SSE: Stream search progress + final payload (preferred by UI) |
 | `/api/game-modes` | GET | Get game mode ID → name mapping |
 | `/api/config` | GET/POST | Read/save API key and filter defaults |
 | `/api/logs` | GET | Get log file contents (params: `lines`, `search`) |

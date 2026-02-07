@@ -123,61 +123,56 @@ function calcElapsedMinutes(tournament) {
  * @returns {Array} - Filtered and sorted tournaments
  */
 function filterTournamentsClientSide(tournaments, filters) {
-    let filtered = tournaments.filter(t => {
+    const filtered = [];
+
+    for (const t of tournaments) {
         // Tournament type filter
         const tType = filters.tournament_type || 'all';
         if (tType !== 'all') {
-            if (tType === 'open' && t.type !== 'open') return false;
-            if (tType === 'password' && t.type !== 'passwordProtected') return false;
+            if (tType === 'open' && t.type !== 'open') continue;
+            if (tType === 'password' && t.type !== 'passwordProtected') continue;
         }
 
         // Status filter
         const status = filters.status || 'all';
         if (status !== 'all') {
-            if (status === 'inProgress' && t.status !== 'inProgress') return false;
-            if (status === 'inPreparation' && t.status !== 'inPreparation') return false;
+            if (status === 'inProgress' && t.status !== 'inProgress') continue;
+            if (status === 'inPreparation' && t.status !== 'inPreparation') continue;
         }
 
         // Game mode filter
         const gameModes = filters.game_modes || [];
-        if (gameModes.length > 0) {
-            if (!gameModes.includes(t.gameModeId)) return false;
-        }
+        if (gameModes.length > 0 && !gameModes.includes(t.gameModeId)) continue;
 
         // Level cap filter
         const levelCaps = filters.level_caps || [];
-        if (levelCaps.length > 0) {
-            if (!levelCaps.includes(String(t.levelCap))) return false;
-        }
+        if (levelCaps.length > 0 && !levelCaps.includes(String(t.levelCap))) continue;
 
         // Player count filters
         const currentPlayers = t.players || 0;
         const minPlayers = filters.min_players || 0;
         const maxPlayers = filters.max_players;
 
-        if (currentPlayers < minPlayers) return false;
-        if (maxPlayers && currentPlayers > maxPlayers) return false;
+        if (currentPlayers < minPlayers) continue;
+        if (maxPlayers && currentPlayers > maxPlayers) continue;
 
-        // Time filters
+        // Time filters (compute once, reused later)
         const remaining = calcRemainingMinutes(t);
         const minRemaining = filters.min_remaining_minutes || 0;
         const maxRemaining = filters.max_remaining_minutes;
 
         if (remaining !== null) {
-            if (remaining < minRemaining) return false;
-            if (maxRemaining && remaining > maxRemaining) return false;
+            if (remaining < minRemaining) continue;
+            if (maxRemaining && remaining > maxRemaining) continue;
         }
 
-        return true;
-    });
-
-    // Add computed time fields and sort
-    filtered = filtered.map(t => ({
-        ...t,
-        remainingMinutes: calcRemainingMinutes(t),
-        elapsedMinutes: calcElapsedMinutes(t),
-        gameMode: t.gameModeName
-    }));
+        filtered.push({
+            ...t,
+            remainingMinutes: remaining,
+            elapsedMinutes: calcElapsedMinutes(t),
+            gameMode: t.gameModeName
+        });
+    }
 
     // Sort by remaining time, then by player count
     filtered.sort((a, b) => {
@@ -223,6 +218,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const toast = document.getElementById('toast');
     const shutdownBtn = document.getElementById('shutdown-btn');
 
+    // Progress elements
+    const searchProgress = document.getElementById('search-progress');
+    const progressPhase = document.getElementById('progress-phase');
+    const progressMetrics = document.getElementById('progress-metrics');
+    const progressBarFill = document.getElementById('progress-bar-fill');
+    const progressDetail = document.getElementById('progress-detail');
+
     // Debug elements
     const debugContent = document.getElementById('debug-content');
     const toggleDebug = document.getElementById('toggle-debug');
@@ -254,6 +256,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let hasApiKey = false;
     let keyVisible = false;
     let heartbeatInterval = null;
+    let activeSearchStream = null;
 
     // Initialize
     init();
@@ -316,7 +319,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Refresh data button
         if (refreshDataBtn) {
-            refreshDataBtn.addEventListener('click', searchTournaments);
+            refreshDataBtn.addEventListener('click', () => searchTournaments({ force: true }));
         }
     }
 
@@ -324,6 +327,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // Send heartbeat every 30 seconds to keep server alive
         heartbeatInterval = setInterval(async () => {
             try {
+                // Don't pile up requests while a long-running search stream is active.
+                if (isSearching || activeSearchStream) return;
                 await fetch('/api/heartbeat', { method: 'POST' });
             } catch (err) {
                 // Server might be down
@@ -544,7 +549,107 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    async function searchTournaments() {
+    function showProgress({ indeterminate = true } = {}) {
+        if (!searchProgress) return;
+        searchProgress.classList.remove('hidden');
+        searchProgress.classList.toggle('indeterminate', indeterminate);
+
+        if (progressPhase) progressPhase.textContent = 'Preparing...';
+        if (progressMetrics) progressMetrics.textContent = indeterminate ? '' : '0%';
+        if (progressDetail) progressDetail.textContent = '';
+        if (progressBarFill) progressBarFill.style.width = '0%';
+
+        const bar = searchProgress.querySelector('.progress-bar');
+        if (bar) bar.setAttribute('aria-valuenow', '0');
+    }
+
+    function hideProgress() {
+        if (!searchProgress) return;
+        searchProgress.classList.add('hidden');
+        searchProgress.classList.remove('indeterminate');
+    }
+
+    function updateProgress(payload) {
+        if (!payload || !searchProgress) return;
+
+        const phase = payload.phase || 'working';
+        let title = 'Working...';
+        if (phase === 'cache') title = 'Using cached crawl';
+        else if (phase === 'crawl') title = 'Crawling tournaments';
+        else if (phase === 'details') title = 'Fetching accurate start times';
+        else if (phase === 'serialize') title = 'Preparing results';
+
+        if (progressPhase) progressPhase.textContent = title;
+
+        // Percent based on completed vs pending (pending includes in-flight + queued).
+        const completed = Number(payload.completed ?? payload.done ?? 0);
+        const pending = Number(payload.pending ?? 0);
+        const total = Number(payload.total ?? (completed + pending) ?? 0);
+
+        let pct = null;
+        if (total > 0 && completed >= 0) {
+            pct = Math.max(0, Math.min(100, Math.floor((completed / total) * 100)));
+        }
+
+        const indeterminate = pct === null;
+        searchProgress.classList.toggle('indeterminate', indeterminate);
+
+        if (pct !== null && progressBarFill) {
+            progressBarFill.style.width = `${pct}%`;
+            const bar = searchProgress.querySelector('.progress-bar');
+            if (bar) bar.setAttribute('aria-valuenow', String(pct));
+        }
+
+        if (progressMetrics) {
+            if (phase === 'details' && payload.total !== undefined) {
+                progressMetrics.textContent = `${completed}/${total}`;
+            } else if (pct !== null) {
+                progressMetrics.textContent = `${pct}%`;
+            } else {
+                progressMetrics.textContent = '';
+            }
+        }
+
+        if (progressDetail) {
+            const uniqueFound = payload.uniqueFound;
+            const drillDowns = payload.drillDowns;
+            const rateLimits = payload.rateLimits;
+            const apiErrors = payload.apiErrors;
+
+            const bits = [];
+            if (uniqueFound !== undefined) bits.push(`Unique: ${uniqueFound}`);
+            if (phase === 'crawl' && payload.pending !== undefined) bits.push(`Remaining: ${pending}`);
+            if (drillDowns !== undefined) bits.push(`Drill-downs: ${drillDowns}`);
+            if (rateLimits !== undefined) bits.push(`429s: ${rateLimits}`);
+            if (apiErrors !== undefined) bits.push(`Errors: ${apiErrors}`);
+            if (payload.message) bits.push(payload.message);
+
+            progressDetail.textContent = bits.join(' · ');
+        }
+    }
+
+    function applySearchResponse(data) {
+        if (data.error) {
+            showStatus('Error: ' + data.error, 'error');
+            resultsSection.classList.add('hidden');
+            hideFetchTimeIndicator();
+            return false;
+        }
+
+        allTournaments = data.tournaments || [];
+        fetchedAt = data.fetchedAt;
+
+        if (data.stats) {
+            updateDebugStats(data.stats);
+        }
+
+        applyFiltersAndDisplay();
+        updateFetchTimeIndicator();
+        showToast(`Found ${allTournaments.length} tournaments!`);
+        return true;
+    }
+
+    async function searchTournaments({ force = false } = {}) {
         if (!hasApiKey) {
             showStatus('Please enter your API key first', 'error');
             return;
@@ -556,37 +661,93 @@ document.addEventListener('DOMContentLoaded', () => {
 
         isSearching = true;
         setLoading(true);
-        showStatus('Fetching tournaments... This takes 15-25 seconds.', 'loading');
+        hideFetchTimeIndicator();
+        showProgress({ indeterminate: true });
+        showStatus('Starting search...', 'loading');
 
-        try {
-            const resp = await fetch('/api/tournaments/search');
-            const data = await resp.json();
+        // Prefer SSE progress stream when available.
+        if ('EventSource' in window) {
+            try {
+                if (activeSearchStream) {
+                    activeSearchStream.close();
+                    activeSearchStream = null;
+                }
 
-            if (data.error) {
-                showStatus('Error: ' + data.error, 'error');
-                resultsSection.classList.add('hidden');
-                hideFetchTimeIndicator();
+                const url = force ? '/api/tournaments/search/stream?force=1' : '/api/tournaments/search/stream';
+                const es = new EventSource(url);
+                activeSearchStream = es;
+
+                let gotAnyEvent = false;
+
+                es.addEventListener('progress', (ev) => {
+                    gotAnyEvent = true;
+                    try {
+                        updateProgress(JSON.parse(ev.data));
+                    } catch {
+                        // ignore malformed progress payloads
+                    }
+                });
+
+                es.addEventListener('done', (ev) => {
+                    gotAnyEvent = true;
+                    try {
+                        const data = JSON.parse(ev.data);
+                        applySearchResponse(data);
+                    } catch (err) {
+                        console.error('Failed to parse done payload:', err);
+                        showStatus('Search finished but response was invalid.', 'error');
+                    } finally {
+                        es.close();
+                        if (activeSearchStream === es) activeSearchStream = null;
+                        hideProgress();
+                        setLoading(false);
+                        isSearching = false;
+                    }
+                });
+
+                es.addEventListener('fail', (ev) => {
+                    gotAnyEvent = true;
+                    try {
+                        const data = JSON.parse(ev.data);
+                        showStatus('Error: ' + (data.error || 'Search failed'), 'error');
+                    } catch {
+                        showStatus('Search failed.', 'error');
+                    } finally {
+                        es.close();
+                        if (activeSearchStream === es) activeSearchStream = null;
+                        hideProgress();
+                        setLoading(false);
+                        isSearching = false;
+                    }
+                });
+
+                es.onerror = () => {
+                    // Network error or non-200 response. If we already got events, it might be a normal close.
+                    if (!gotAnyEvent) {
+                        showStatus('Search connection failed. Refresh the page and try again.', 'error');
+                    }
+                    es.close();
+                    if (activeSearchStream === es) activeSearchStream = null;
+                    hideProgress();
+                    setLoading(false);
+                    isSearching = false;
+                };
+
+                // Cleanup is handled by events.
                 return;
+            } catch (err) {
+                console.error('Failed to start SSE search:', err);
+                // Fall through to non-SSE fetch below.
             }
+        }
 
-            // Store fetched data for client-side filtering
-            allTournaments = data.tournaments;
-            fetchedAt = data.fetchedAt;
-
-            // Update debug stats
-            if (data.stats) {
-                updateDebugStats(data.stats);
-            }
-
-            // Apply current filters and display results
-            applyFiltersAndDisplay();
-
-            // Show fetch time indicator
-            updateFetchTimeIndicator();
-
-            // Show toast notification
-            showToast(`Found ${allTournaments.length} tournaments!`);
-
+        // Fallback: plain fetch without progress.
+        try {
+            showStatus('Fetching tournaments... This may take 15-25 seconds.', 'loading');
+            const url = force ? '/api/tournaments/search?force=1' : '/api/tournaments/search';
+            const resp = await fetch(url);
+            const data = await resp.json();
+            applySearchResponse(data);
         } catch (err) {
             console.error('Search failed:', err);
             showStatus('Search failed. Check your connection and API key.', 'error');
@@ -594,6 +755,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } finally {
             setLoading(false);
             isSearching = false;
+            hideProgress();
         }
     }
 
@@ -722,7 +884,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <td><span class="status-badge ${statusClass}">${statusText}</span></td>
                 <td>${elapsed}</td>
                 <td>${timeLeft}</td>
-                <td class="tag-cell" data-tag="${escapeHtml(t.tag)}">${escapeHtml(t.tag)}</td>
+                <td><button type="button" class="tag-pill" data-tag="${escapeHtml(t.tag)}" title="Copy tag">${escapeHtml(t.tag)}</button></td>
                 <td><a href="${joinUrl}" target="_blank" rel="noopener" class="join-btn">${lockIcon}Join</a></td>
             `;
 
@@ -797,11 +959,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function calculateTimePercent(tournament) {
-        // Estimate: assume max tournament duration is 60 minutes
-        // If we have remaining time, calculate percentage
         if (tournament.remainingMinutes === null) return 100;
-        const maxDuration = 60; // minutes
-        const percent = (tournament.remainingMinutes / maxDuration) * 100;
+        const durationSeconds = tournament.duration || 0;
+        const durationMinutes = durationSeconds > 0 ? (durationSeconds / 60) : 60;
+        const percent = (tournament.remainingMinutes / durationMinutes) * 100;
         return Math.min(100, Math.max(0, percent));
     }
 
@@ -911,7 +1072,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Event Listeners
-    searchBtn.addEventListener('click', searchTournaments);
+    searchBtn.addEventListener('click', () => searchTournaments({ force: false }));
     saveDefaultsBtn.addEventListener('click', saveDefaults);
     saveApiKeyBtn.addEventListener('click', saveApiKey);
     toggleKeySection.addEventListener('click', toggleApiKeySection);
@@ -926,9 +1087,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Click to copy tag (desktop table)
     resultsBody.addEventListener('click', (e) => {
-        if (e.target.classList.contains('tag-cell')) {
-            copyTag(e.target.dataset.tag);
-        }
+        const btn = e.target.closest('.tag-pill');
+        if (btn) copyTag(btn.dataset.tag);
     });
 
     // Click to copy tag (mobile cards)

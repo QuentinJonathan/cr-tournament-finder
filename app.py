@@ -6,19 +6,20 @@ A web app to find and filter CR tournaments
 
 import json
 import os
-import sys
 import time
 import threading
 import logging
+import queue
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
-from flask import Flask, render_template, jsonify, request, session, redirect, url_for, send_from_directory
+from flask import Flask, render_template, jsonify, request, session, redirect, url_for, send_from_directory, Response, stream_with_context
 from functools import wraps
 import secrets
 import requests as http_requests
+from requests.adapters import HTTPAdapter
 
 app = Flask(__name__)
 
@@ -62,21 +63,48 @@ LOG_FILE = os.path.join(LOGS_DIR, 'tournament_finder.log')
 logger = logging.getLogger('TournamentFinder')
 logger.setLevel(logging.DEBUG)
 
-# File handler (rotating, max 5MB, keep 3 backups)
-file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=3)
-file_handler.setLevel(logging.INFO)
-file_format = logging.Formatter('%(asctime)s %(levelname)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-file_handler.setFormatter(file_format)
+# Avoid duplicated log lines if the module gets imported multiple times.
+if not logger.handlers:
+    # File handler (rotating, max 5MB, keep 3 backups)
+    file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=3)
+    file_handler.setLevel(logging.INFO)
+    file_format = logging.Formatter('%(asctime)s %(levelname)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    file_handler.setFormatter(file_format)
 
-# Console handler
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_format = logging.Formatter('%(asctime)s %(levelname)s %(message)s', datefmt='%H:%M:%S')
-console_handler.setFormatter(console_format)
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_format = logging.Formatter('%(asctime)s %(levelname)s %(message)s', datefmt='%H:%M:%S')
+    console_handler.setFormatter(console_format)
 
-# Add handlers
-logger.addHandler(file_handler)
-logger.addHandler(console_handler)
+    # Add handlers
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+# =============================================================================
+# HTTP SESSION (CONNECTION POOLING)
+# =============================================================================
+#
+# `requests.get()` creates a new Session per call, which is slow for 800+ requests.
+# We use a per-thread Session for keep-alive connection pooling.
+_HTTP_LOCAL = threading.local()
+
+
+def _build_http_session():
+    sess = http_requests.Session()
+    pool_max = int(os.environ.get('HTTP_POOL_MAXSIZE', 50))
+    adapter = HTTPAdapter(pool_connections=pool_max, pool_maxsize=pool_max)
+    sess.mount("https://", adapter)
+    sess.mount("http://", adapter)
+    return sess
+
+
+def get_http_session():
+    sess = getattr(_HTTP_LOCAL, "session", None)
+    if sess is None:
+        sess = _build_http_session()
+        _HTTP_LOCAL.session = sess
+    return sess
 
 # Search statistics (reset per search)
 search_stats = {
@@ -86,6 +114,11 @@ search_stats = {
     'api_errors': 0,
     'tournaments_by_mode': defaultdict(int)
 }
+
+# Cached crawler results (search API) to avoid repeated heavy crawls across requests.
+_SEARCH_CACHE_COND = threading.Condition()
+_SEARCH_CACHE = None
+_SEARCH_FETCH_IN_PROGRESS = False
 
 # Paths
 CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
@@ -157,12 +190,37 @@ def has_api_key():
     return bool(config.get('api_key'))
 
 
+def validate_api_access():
+    """Validate API key by making a cheap request.
+
+    Returns:
+        (ok: bool, error_msg: str|None)
+    """
+    try:
+        resp = get_http_session().get(
+            f"{API_BASE}/tournaments",
+            headers=get_api_headers(),
+            params={"name": "a", "limit": 1},
+            timeout=10,
+        )
+
+        if resp.status_code == 200:
+            return True, None
+        if resp.status_code in (401, 403):
+            return False, "Unauthorized (API key invalid or not accepted by proxy)."
+        if resp.status_code == 429:
+            return False, "Rate limited by API (429). Try again in a moment."
+        return False, f"API error: HTTP {resp.status_code}"
+    except Exception as e:
+        return False, f"API request failed: {e}"
+
+
 def fetch_tournaments_by_query(query):
     """Fetch tournaments matching a query string with retry on failure"""
     global search_stats
     for attempt in range(2):
         try:
-            resp = http_requests.get(
+            resp = get_http_session().get(
                 f"{API_BASE}/tournaments",
                 headers=get_api_headers(),
                 params={"name": query, "limit": 100},
@@ -199,7 +257,7 @@ def fetch_tournament_detail(tag):
 
     for attempt in range(2):
         try:
-            resp = http_requests.get(
+            resp = get_http_session().get(
                 f"{API_BASE}/tournaments/{encoded_tag}",
                 headers=get_api_headers(),
                 timeout=10
@@ -214,13 +272,35 @@ def fetch_tournament_detail(tag):
     return None
 
 
-def fetch_tournament_details_batch(tournaments):
+_DETAIL_CACHE_LOCK = threading.Lock()
+_DETAIL_CACHE = {}
+
+
+def _get_cached_tournament_detail(tag):
+    ttl = int(os.environ.get("DETAIL_CACHE_TTL_SECONDS", 300))
+    now = time.time()
+
+    with _DETAIL_CACHE_LOCK:
+        cached = _DETAIL_CACHE.get(tag)
+        if cached and now < cached["expires_at"]:
+            return cached["detail"]
+
+    detail = fetch_tournament_detail(tag)
+    if detail:
+        with _DETAIL_CACHE_LOCK:
+            _DETAIL_CACHE[tag] = {"expires_at": now + ttl, "detail": detail}
+    return detail
+
+
+def fetch_tournament_details_batch(tournaments, progress_cb=None, stop_event=None):
     """Fetch details for multiple tournaments in parallel.
 
     Gets accurate startedTime/endedTime from detail API.
 
     Args:
         tournaments: List of tournament dicts (must have 'tag' field)
+        progress_cb: Optional callable invoked with progress payloads
+        stop_event: Optional threading.Event to stop scheduling further work
 
     Returns:
         Same list with startedTime/endedTime added where available
@@ -228,23 +308,135 @@ def fetch_tournament_details_batch(tournaments):
     if not tournaments:
         return tournaments
 
-    tags = [t['tag'] for t in tournaments]
+    by_tag = {t['tag']: t for t in tournaments if t.get('tag')}
+    tags = list(by_tag.keys())
+
+    total = len(tags)
+    completed = 0
+    last_emit_ts = 0.0
+
+    def emit(force=False):
+        nonlocal last_emit_ts
+        if not progress_cb:
+            return
+        now_ts = time.time()
+        if not force and (now_ts - last_emit_ts) < 0.25:
+            return
+        last_emit_ts = now_ts
+        progress_cb({
+            "phase": "details",
+            "completed": completed,
+            "total": total,
+        })
+
+    emit(force=True)
 
     max_detail_workers = int(os.environ.get('DETAIL_WORKERS', 25))
     with ThreadPoolExecutor(max_workers=min(max_detail_workers, len(tags))) as executor:
-        details = list(executor.map(fetch_tournament_detail, tags))
+        future_to_tag = {executor.submit(_get_cached_tournament_detail, tag): tag for tag in tags}
+        for future in as_completed(future_to_tag):
+            if stop_event and stop_event.is_set():
+                break
+            tag = future_to_tag[future]
+            detail = None
+            try:
+                detail = future.result()
+            except Exception:
+                detail = None
 
-    for tournament, detail in zip(tournaments, details):
-        if detail:
-            if 'startedTime' in detail:
-                tournament['startedTime'] = detail['startedTime']
-            if 'endedTime' in detail:
-                tournament['endedTime'] = detail['endedTime']
+            tournament = by_tag.get(tag)
+            if tournament and detail:
+                if 'startedTime' in detail:
+                    tournament['startedTime'] = detail['startedTime']
+                if 'endedTime' in detail:
+                    tournament['endedTime'] = detail['endedTime']
+
+            completed += 1
+            emit()
+
+    emit(force=True)
 
     return tournaments
 
 
-def fetch_all_tournaments():
+def fetch_tournament_details_for_in_progress(tournaments, progress_cb=None, stop_event=None):
+    """Fetch details only for in-progress tournaments (startedTime matters there)."""
+    if not tournaments:
+        return tournaments
+    subset = [t for t in tournaments if t.get('status') == 'inProgress']
+    if subset:
+        fetch_tournament_details_batch(subset, progress_cb=progress_cb, stop_event=stop_event)
+    return tournaments
+
+
+def _snapshot_search_stats():
+    # Make the defaultdict JSON-friendly and avoid accidental mutation.
+    return {
+        "queries_completed": int(search_stats.get("queries_completed", 0)),
+        "drill_downs": int(search_stats.get("drill_downs", 0)),
+        "rate_limits": int(search_stats.get("rate_limits", 0)),
+        "api_errors": int(search_stats.get("api_errors", 0)),
+        "tournaments_by_mode": dict(search_stats.get("tournaments_by_mode", {})),
+    }
+
+
+def get_fresh_search_cache():
+    """Return the cached crawler result if it's still fresh, else None."""
+    ttl = int(os.environ.get("SEARCH_CACHE_TTL_SECONDS", 60))
+    if ttl <= 0:
+        return None
+    with _SEARCH_CACHE_COND:
+        now = time.time()
+        if _SEARCH_CACHE and now < _SEARCH_CACHE["expires_at_ts"]:
+            return _SEARCH_CACHE
+    return None
+
+
+def get_cached_search_results(force_refresh=False):
+    """Fetch tournaments via the crawler, with an in-memory TTL cache and in-flight dedupe."""
+    global _SEARCH_CACHE, _SEARCH_FETCH_IN_PROGRESS
+
+    ttl = int(os.environ.get("SEARCH_CACHE_TTL_SECONDS", 60))  # 0 disables cache reuse (but still dedupes in-flight)
+
+    with _SEARCH_CACHE_COND:
+        now = time.time()
+        if not force_refresh and ttl > 0 and _SEARCH_CACHE and now < _SEARCH_CACHE["expires_at_ts"]:
+            return _SEARCH_CACHE
+
+        # If a fetch is already running, wait for it and reuse its result (even if ttl==0).
+        if _SEARCH_FETCH_IN_PROGRESS:
+            while _SEARCH_FETCH_IN_PROGRESS:
+                _SEARCH_CACHE_COND.wait(timeout=0.5)
+            if _SEARCH_CACHE:
+                return _SEARCH_CACHE
+
+        _SEARCH_FETCH_IN_PROGRESS = True
+
+    # Do the expensive work outside the lock.
+    cache = None
+    try:
+        tournaments = fetch_all_tournaments()
+        fetched_at_ts = time.time()
+        fetched_at_iso = datetime.now(timezone.utc).isoformat()
+        stats_snapshot = _snapshot_search_stats()
+
+        cache = {
+            "tournaments": tournaments,
+            "fetchedAt": fetched_at_iso,
+            "fetched_at_ts": fetched_at_ts,
+            "expires_at_ts": fetched_at_ts + ttl if ttl > 0 else fetched_at_ts,
+            "stats": stats_snapshot,
+        }
+        with _SEARCH_CACHE_COND:
+            _SEARCH_CACHE = cache
+        return cache
+    finally:
+        with _SEARCH_CACHE_COND:
+            _SEARCH_FETCH_IN_PROGRESS = False
+            _SEARCH_CACHE_COND.notify_all()
+
+
+def fetch_all_tournaments(progress_cb=None, stop_event=None):
     """Fetch tournaments with best coverage in reasonable time (~20-30s).
 
     Strategy:
@@ -267,13 +459,14 @@ def fetch_all_tournaments():
     start_time = time.time()
 
     letters = 'abcdefghijklmnopqrstuvwxyz'
-    chars = list(letters + '0123456789')
+    digits = '0123456789'
+    latin_chars = list(letters + digits)
 
     # 2-letter combinations (676)
     queries = [a + b for a in letters for b in letters]
 
     # Single digits
-    queries.extend(list('0123456789'))
+    queries.extend(list(digits))
 
     # Cyrillic letters (33) for Russian tournament names
     cyrillic_letters = 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя'
@@ -293,8 +486,45 @@ def fetch_all_tournaments():
 
     # Reduce workers on low-memory servers (Free tier = 512MB)
     WORKERS = int(os.environ.get('SEARCH_WORKERS', 25))
+    max_latin_len = int(os.environ.get("MAX_QUERY_LEN", 4))
+    max_cyrillic_len = int(os.environ.get("MAX_CYRILLIC_QUERY_LEN", 2))
+
+    def drilldown_chars_and_limit(q):
+        # Prevent wasteful mixed-script drilldowns (e.g., "а" + "b").
+        if any(ch in cyrillic_letters for ch in q):
+            return list(cyrillic_letters + digits), max_cyrillic_len
+        return latin_chars, max_latin_len
+
+    scheduled = 0
+    completed = 0
+    last_emit_ts = 0.0
+
+    def emit(force=False, message=None):
+        nonlocal last_emit_ts
+        if not progress_cb:
+            return
+        now_ts = time.time()
+        if not force and (now_ts - last_emit_ts) < 0.25:
+            return
+        last_emit_ts = now_ts
+
+        pending = (scheduled - completed) + len(to_search)
+        payload = {
+            "phase": "crawl",
+            "completed": completed,
+            "pending": pending,
+            "uniqueFound": len(all_tournaments),
+            "drillDowns": search_stats.get('drill_downs', 0),
+            "rateLimits": search_stats.get('rate_limits', 0),
+            "apiErrors": search_stats.get('api_errors', 0),
+        }
+        if message:
+            payload["message"] = message
+        progress_cb(payload)
 
     while to_search:
+        if stop_event and stop_event.is_set():
+            break
         # Dedupe
         batch = [q for q in to_search if q not in searched]
         for q in batch:
@@ -307,20 +537,34 @@ def fetch_all_tournaments():
 
         # Search in parallel
         with ThreadPoolExecutor(max_workers=WORKERS) as executor:
-            results = list(executor.map(fetch_tournaments_by_query, batch))
+            future_to_query = {executor.submit(fetch_tournaments_by_query, q): q for q in batch}
+            scheduled += len(batch)
+            emit(force=True)
 
-        # Process and drill down if needed
-        for query, result_list in zip(batch, results):
-            for t in result_list:
-                all_tournaments[t['tag']] = t
+            for future in as_completed(future_to_query):
+                query = future_to_query[future]
+                try:
+                    result_list = future.result()
+                except Exception:
+                    result_list = []
 
-            # Drill down if we hit the limit, up to 4 chars max
-            if len(result_list) >= 20 and len(query) < 4:
-                search_stats['drill_downs'] += 1
-                for c in chars:
-                    new_q = query + c
-                    if new_q not in searched:
-                        to_search.append(new_q)
+                completed += 1
+
+                for t in result_list:
+                    all_tournaments[t['tag']] = t
+
+                # Drill down if we hit the limit. Use a script-aware alphabet and per-script max depth.
+                chars, max_len = drilldown_chars_and_limit(query)
+                if len(result_list) >= 20 and len(query) < max_len:
+                    search_stats['drill_downs'] += 1
+                    for c in chars:
+                        new_q = query + c
+                        if new_q not in searched:
+                            to_search.append(new_q)
+
+                emit()
+
+        emit(force=True)
 
     elapsed = time.time() - start_time
 
@@ -550,6 +794,11 @@ def api_tournaments():
     """Fetch and filter tournaments with accurate timing from detail API"""
     if not has_api_key():
         return jsonify({"error": "API key not configured"}), 400
+    cache = get_fresh_search_cache()
+    if cache is None:
+        ok, err = validate_api_access()
+        if not ok:
+            return jsonify({"error": err}), 400
 
     # Get filters from query params or use saved defaults
     filters = {
@@ -570,16 +819,19 @@ def api_tournaments():
     logger.info(f"         level_caps={filters['level_caps']}, players={filters['min_players']}-{filters['max_players']}")
     logger.info(f"         remaining_minutes={filters['min_remaining_minutes']}-{filters['max_remaining_minutes']}")
 
-    # Phase 1: Fetch all tournaments (search API)
-    tournaments = fetch_all_tournaments()
+    # Phase 1: Fetch all tournaments (crawler), cached across requests
+    if cache is None:
+        cache = get_cached_search_results(force_refresh=False)
+    tournaments = cache["tournaments"]
     unfiltered_total = len(tournaments)
+    cached_stats = cache.get("stats", _snapshot_search_stats())
 
     # Phase 2: Apply non-time filters first (reduces to ~10-50 tournaments)
     filtered = filter_tournaments(tournaments, filters, apply_time_filter=False)
     logger.info(f"After non-time filters: {len(filtered)} tournaments")
 
-    # Phase 3: Fetch details for filtered tournaments (gets accurate startedTime)
-    filtered = fetch_tournament_details_batch(filtered)
+    # Phase 3: Fetch details only when needed (in-progress tournaments)
+    filtered = fetch_tournament_details_for_in_progress(filtered)
 
     # Phase 4: Apply time filters with accurate times
     filtered = filter_tournaments(filtered, filters, apply_time_filter=True)
@@ -616,11 +868,11 @@ def api_tournaments():
         "total": len(result),
         "unfilteredTotal": unfiltered_total,
         "stats": {
-            "queries": search_stats['queries_completed'],
-            "drillDowns": search_stats['drill_downs'],
-            "rateLimits": search_stats['rate_limits'],
-            "apiErrors": search_stats['api_errors'],
-            "tournamentsByMode": dict(search_stats['tournaments_by_mode'])
+            "queries": cached_stats.get("queries_completed", 0),
+            "drillDowns": cached_stats.get("drill_downs", 0),
+            "rateLimits": cached_stats.get("rate_limits", 0),
+            "apiErrors": cached_stats.get("api_errors", 0),
+            "tournamentsByMode": cached_stats.get("tournaments_by_mode", {})
         }
     })
 
@@ -636,17 +888,28 @@ def api_tournaments_search():
     """
     if not has_api_key():
         return jsonify({"error": "API key not configured"}), 400
+    force_refresh = request.args.get("force", "").strip() in ("1", "true", "yes")
+    cache = None
+    if not force_refresh:
+        cache = get_fresh_search_cache()
+    if cache is None:
+        ok, err = validate_api_access()
+        if not ok:
+            return jsonify({"error": err}), 400
 
     logger.info("=" * 60)
     logger.info("=== FETCH ALL TOURNAMENTS (for client-side filtering) ===")
 
-    # Phase 1: Fetch all tournaments (search API)
-    tournaments = fetch_all_tournaments()
+    # Phase 1: Fetch all tournaments (crawler), cached across requests
+    if cache is None:
+        cache = get_cached_search_results(force_refresh=force_refresh)
+    tournaments = cache["tournaments"]
     total_count = len(tournaments)
+    cached_stats = cache.get("stats", _snapshot_search_stats())
 
-    # Phase 2: Fetch details for ALL tournaments to get accurate startedTime
-    logger.info(f"Fetching details for {total_count} tournaments...")
-    tournaments = fetch_tournament_details_batch(tournaments)
+    # Phase 2: Fetch details only for in-progress tournaments (startedTime matters there)
+    logger.info(f"Fetching details for in-progress tournaments (from {total_count} total)...")
+    tournaments = fetch_tournament_details_for_in_progress(tournaments)
 
     # Prepare response with raw time fields
     result = []
@@ -674,15 +937,160 @@ def api_tournaments_search():
     return jsonify({
         "tournaments": result,
         "total": len(result),
-        "fetchedAt": datetime.now(timezone.utc).isoformat(),
+        "fetchedAt": cache.get("fetchedAt") or datetime.now(timezone.utc).isoformat(),
         "stats": {
-            "queries": search_stats['queries_completed'],
-            "drillDowns": search_stats['drill_downs'],
-            "rateLimits": search_stats['rate_limits'],
-            "apiErrors": search_stats['api_errors'],
-            "tournamentsByMode": dict(search_stats['tournaments_by_mode'])
+            "queries": cached_stats.get("queries_completed", 0),
+            "drillDowns": cached_stats.get("drill_downs", 0),
+            "rateLimits": cached_stats.get("rate_limits", 0),
+            "apiErrors": cached_stats.get("api_errors", 0),
+            "tournamentsByMode": cached_stats.get("tournaments_by_mode", {})
         }
     })
+
+
+def build_tournaments_search_payload(tournaments, fetched_at_iso, stats_snapshot):
+    """Build the `/api/tournaments/search` response payload from raw tournaments."""
+    result = []
+    for t in tournaments:
+        result.append({
+            "tag": t.get('tag'),
+            "name": t.get('name'),
+            "type": t.get('type'),
+            "status": t.get('status'),
+            "players": t.get('capacity', 0),
+            "maxPlayers": t.get('maxCapacity', 0),
+            "levelCap": t.get('levelCap'),
+            "gameModeId": str(t.get('gameMode', {}).get('id', '')),
+            "gameModeName": get_mode_name(t.get('gameMode', {}).get('id')),
+            # Raw time fields for client-side calculation
+            "createdTime": t.get('createdTime'),
+            "preparationDuration": t.get('preparationDuration', 0),
+            "duration": t.get('duration', 0),
+            "startedTime": t.get('startedTime'),
+            "endedTime": t.get('endedTime')
+        })
+
+    return {
+        "tournaments": result,
+        "total": len(result),
+        "fetchedAt": fetched_at_iso,
+        "stats": {
+            "queries": stats_snapshot.get("queries_completed", 0),
+            "drillDowns": stats_snapshot.get("drill_downs", 0),
+            "rateLimits": stats_snapshot.get("rate_limits", 0),
+            "apiErrors": stats_snapshot.get("api_errors", 0),
+            "tournamentsByMode": stats_snapshot.get("tournaments_by_mode", {}),
+        },
+    }
+
+
+@app.route('/api/tournaments/search/stream')
+@login_required
+def api_tournaments_search_stream():
+    """Stream tournament search progress via Server-Sent Events (SSE).
+
+    Event types:
+      - progress: progress payload (phase, counts, etc.)
+      - done: final payload (same shape as /api/tournaments/search)
+      - fail: error payload
+    """
+    if not has_api_key():
+        payload = f"event: fail\ndata: {json.dumps({'error': 'API key not configured'})}\n\n"
+        return Response(payload, mimetype="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+    force_refresh = request.args.get("force", "").strip() in ("1", "true", "yes")
+
+    q = queue.Queue()
+    stop_event = threading.Event()
+
+    def push_event(event_type, data):
+        try:
+            msg = json.dumps(data, separators=(",", ":"))
+        except Exception:
+            msg = json.dumps({"error": "Failed to encode event payload"})
+        q.put(f"event: {event_type}\ndata: {msg}\n\n")
+
+    def progress_cb(payload):
+        push_event("progress", payload)
+
+    def worker():
+        try:
+            cache = None
+            if not force_refresh:
+                cache = get_fresh_search_cache()
+
+            if cache is not None:
+                tournaments = cache.get("tournaments", [])
+                stats_snapshot = cache.get("stats", _snapshot_search_stats())
+                fetched_at_iso = cache.get("fetchedAt") or datetime.now(timezone.utc).isoformat()
+                progress_cb({"phase": "cache", "message": "Using cached crawl"})
+            else:
+                ok, err = validate_api_access()
+                if not ok:
+                    push_event("fail", {"error": err})
+                    return
+
+                tournaments = fetch_all_tournaments(progress_cb=progress_cb, stop_event=stop_event)
+                stats_snapshot = _snapshot_search_stats()
+                fetched_at_iso = datetime.now(timezone.utc).isoformat()
+
+                ttl = int(os.environ.get("SEARCH_CACHE_TTL_SECONDS", 60))
+                fetched_at_ts = time.time()
+                new_cache = {
+                    "tournaments": tournaments,
+                    "fetchedAt": fetched_at_iso,
+                    "fetched_at_ts": fetched_at_ts,
+                    "expires_at_ts": fetched_at_ts + ttl if ttl > 0 else fetched_at_ts,
+                    "stats": stats_snapshot,
+                }
+                with _SEARCH_CACHE_COND:
+                    global _SEARCH_CACHE
+                    _SEARCH_CACHE = new_cache
+
+            # Details phase (only in-progress tournaments)
+            in_progress = [t for t in tournaments if t.get('status') == 'inProgress']
+            progress_cb({"phase": "details", "completed": 0, "total": len(in_progress)})
+            fetch_tournament_details_batch(in_progress, progress_cb=progress_cb, stop_event=stop_event)
+
+            progress_cb({"phase": "serialize", "message": "Preparing results"})
+
+            payload = build_tournaments_search_payload(
+                tournaments=tournaments,
+                fetched_at_iso=fetched_at_iso,
+                stats_snapshot=stats_snapshot,
+            )
+            push_event("done", payload)
+        except Exception as e:
+            logger.exception("SSE search failed")
+            push_event("fail", {"error": str(e)})
+        finally:
+            q.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def gen():
+        try:
+            # Tell EventSource how long to wait before retrying if it reconnects.
+            yield "retry: 1500\n\n"
+            while True:
+                try:
+                    item = q.get(timeout=1.0)
+                except queue.Empty:
+                    # Keep-alive comment.
+                    yield ": keepalive\n\n"
+                    continue
+                if item is None:
+                    break
+                yield item
+        finally:
+            stop_event.set()
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    return Response(stream_with_context(gen()), mimetype="text/event-stream", headers=headers)
 
 
 @app.route('/api/game-modes')

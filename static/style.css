@@ -551,6 +551,72 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 
 /* ========================================
+   SEARCH PROGRESS (SSE)
+   ======================================== */
+.search-progress {
+    padding: 14px 18px;
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-md);
+    background: rgba(0, 212, 255, 0.08);
+    border: 1px solid rgba(0, 212, 255, 0.25);
+    animation: fadeIn 0.3s ease;
+}
+
+.search-progress-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: var(--space-md);
+    margin-bottom: var(--space-sm);
+}
+
+.progress-phase {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.progress-metrics {
+    font-family: 'JetBrains Mono', 'SF Mono', Monaco, monospace;
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+.progress-bar {
+    height: 10px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-full);
+    overflow: hidden;
+    position: relative;
+}
+
+.progress-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--gradient-blue);
+    box-shadow: var(--glow-blue);
+    transition: width 200ms linear;
+}
+
+.search-progress.indeterminate .progress-bar-fill {
+    width: 35%;
+    position: absolute;
+    left: 0;
+    animation: progressIndeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes progressIndeterminate {
+    0% { transform: translateX(-120%); }
+    100% { transform: translateX(320%); }
+}
+
+.progress-detail {
+    margin-top: var(--space-sm);
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+}
+
+/* ========================================
    FETCH TIME INDICATOR
    ======================================== */
 .fetch-time-indicator {
@@ -626,17 +692,27 @@ td {
 }
 
 /* Numeric columns right-aligned for better readability */
+td:nth-child(3),
 td:nth-child(4),
-td:nth-child(5),
-td:nth-child(6) {
+td:nth-child(6),
+td:nth-child(7) {
     text-align: right;
     font-variant-numeric: tabular-nums;
 }
 
+th:nth-child(3),
 th:nth-child(4),
-th:nth-child(5),
-th:nth-child(6) {
+th:nth-child(6),
+th:nth-child(7) {
     text-align: right;
+}
+
+/* Center non-numeric action/status columns */
+td:nth-child(5),
+th:nth-child(5),
+td:nth-child(9),
+th:nth-child(9) {
+    text-align: center;
 }
 
 tbody tr {
@@ -651,8 +727,8 @@ tbody tr:last-child td {
     border-bottom: none;
 }
 
-/* Tag (clickable) */
-.tag-cell {
+/* Tag copy button (desktop table) */
+.tag-pill {
     font-family: 'JetBrains Mono', 'SF Mono', Monaco, monospace;
     font-size: 0.875rem;
     color: var(--blue-electric);
@@ -664,11 +740,20 @@ tbody tr:last-child td {
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    border: 1px solid rgba(0, 212, 255, 0.25);
+    text-decoration: none;
+    -webkit-appearance: none;
+    appearance: none;
 }
 
-.tag-cell:hover {
+.tag-pill:hover {
     background: rgba(0, 212, 255, 0.2);
     box-shadow: var(--glow-blue);
+}
+
+.tag-pill:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.25);
 }
 
 /* ========================================
@@ -1462,5 +1547,25 @@ tbody tr:last-child td {
 
     .filters-grid {
         gap: var(--space-sm);
+    }
+}
+
+/* ========================================
+   ACCESSIBILITY - REDUCED MOTION
+   ======================================== */
+@media (prefers-reduced-motion: reduce) {
+    * {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important;
+    }
+
+    .card {
+        opacity: 1;
+    }
+
+    .result-card {
+        opacity: 1;
+        transform: none;
     }
 }

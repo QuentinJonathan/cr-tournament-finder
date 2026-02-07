@@ -131,6 +131,18 @@
         <!-- Status Message -->
         <div id="status-message" class="status-message hidden"></div>
 
+        <!-- Search Progress (SSE) -->
+        <div id="search-progress" class="search-progress hidden" aria-live="polite">
+            <div class="search-progress-head">
+                <span id="progress-phase" class="progress-phase">Preparing...</span>
+                <span id="progress-metrics" class="progress-metrics">0%</span>
+            </div>
+            <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <div id="progress-bar-fill" class="progress-bar-fill"></div>
+            </div>
+            <div id="progress-detail" class="progress-detail"></div>
+        </div>
+
         <!-- Fetch Time Indicator -->
         <div id="fetch-time-indicator" class="fetch-time-indicator hidden">
             <span id="fetch-time-text">Data fetched: --</span>
