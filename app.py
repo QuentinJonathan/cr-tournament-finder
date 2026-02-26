@@ -10,16 +10,17 @@ import time
 import threading
 import logging
 import queue
+import asyncio
+import aiohttp
+import certifi
+import ssl
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
 from flask import Flask, render_template, jsonify, request, session, redirect, url_for, send_from_directory, Response, stream_with_context
 from functools import wraps
 import secrets
-import requests as http_requests
-from requests.adapters import HTTPAdapter
 
 app = Flask(__name__)
 
@@ -82,29 +83,9 @@ if not logger.handlers:
     logger.addHandler(console_handler)
 
 # =============================================================================
-# HTTP SESSION (CONNECTION POOLING)
 # =============================================================================
-#
-# `requests.get()` creates a new Session per call, which is slow for 800+ requests.
-# We use a per-thread Session for keep-alive connection pooling.
-_HTTP_LOCAL = threading.local()
-
-
-def _build_http_session():
-    sess = http_requests.Session()
-    pool_max = int(os.environ.get('HTTP_POOL_MAXSIZE', 50))
-    adapter = HTTPAdapter(pool_connections=pool_max, pool_maxsize=pool_max)
-    sess.mount("https://", adapter)
-    sess.mount("http://", adapter)
-    return sess
-
-
-def get_http_session():
-    sess = getattr(_HTTP_LOCAL, "session", None)
-    if sess is None:
-        sess = _build_http_session()
-        _HTTP_LOCAL.session = sess
-    return sess
+# ASYNC API CLIENT CONFIGURATION
+# =============================================================================
 
 # Search statistics (reset per search)
 search_stats = {
@@ -125,6 +106,12 @@ CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
 GAME_MODES_PATH = os.path.join(BASE_DIR, 'game_modes.json')
 
 # API
+
+def get_ssl_context():
+    return ssl.create_default_context(cafile=certifi.where())
+
+API_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
 API_BASE = "https://proxy.royaleapi.dev/v1"
 
 # Load game modes
@@ -190,83 +177,72 @@ def has_api_key():
     return bool(config.get('api_key'))
 
 
+async def validate_api_access_async():
+    """Validate API key by making a cheap request asynchronously."""
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=get_ssl_context())) as session:
+        try:
+            async with session.get(
+                f"{API_BASE}/tournaments",
+                headers=get_api_headers(),
+                params={"name": "a", "limit": 1},
+                timeout=API_TIMEOUT,
+            ) as resp:
+                if resp.status == 200:
+                    return True, None
+                if resp.status in (401, 403):
+                    return False, "Unauthorized (API key invalid or not accepted by proxy)."
+                if resp.status == 429:
+                    return False, "Rate limited by API (429). Try again in a moment."
+                return False, f"API error: HTTP {resp.status}"
+        except Exception as e:
+            return False, f"API request failed: {e}"
+
 def validate_api_access():
-    """Validate API key by making a cheap request.
+    return asyncio.run(validate_api_access_async())
 
-    Returns:
-        (ok: bool, error_msg: str|None)
-    """
-    try:
-        resp = get_http_session().get(
-            f"{API_BASE}/tournaments",
-            headers=get_api_headers(),
-            params={"name": "a", "limit": 1},
-            timeout=10,
-        )
-
-        if resp.status_code == 200:
-            return True, None
-        if resp.status_code in (401, 403):
-            return False, "Unauthorized (API key invalid or not accepted by proxy)."
-        if resp.status_code == 429:
-            return False, "Rate limited by API (429). Try again in a moment."
-        return False, f"API error: HTTP {resp.status_code}"
-    except Exception as e:
-        return False, f"API request failed: {e}"
-
-
-def fetch_tournaments_by_query(query):
-    """Fetch tournaments matching a query string with retry on failure"""
+async def fetch_tournaments_by_query_async(session, query):
+    """Fetch tournaments matching a query string asynchronously with retry on failure"""
     global search_stats
     for attempt in range(2):
         try:
-            resp = get_http_session().get(
+            async with session.get(
                 f"{API_BASE}/tournaments",
                 headers=get_api_headers(),
                 params={"name": query, "limit": 100},
-                timeout=10
-            )
-            if resp.status_code == 200:
-                search_stats['queries_completed'] += 1
-                return resp.json().get("items", [])
-            elif resp.status_code == 429:
-                search_stats['rate_limits'] += 1
-                time.sleep(0.5 + attempt)
-                continue
-            else:
-                search_stats['api_errors'] += 1
-                logger.debug(f"API error for query '{query}': HTTP {resp.status_code}")
+                timeout=API_TIMEOUT,
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    search_stats['queries_completed'] += 1
+                    return data.get("items", [])
+                elif resp.status == 429:
+                    search_stats['rate_limits'] += 1
+                    await asyncio.sleep(0.5 + attempt)
+                    continue
+                else:
+                    search_stats['api_errors'] += 1
+                    logger.debug(f"API error for query '{query}': HTTP {resp.status}")
         except Exception as e:
             search_stats['api_errors'] += 1
             logger.debug(f"Request error for query '{query}': {e}")
     return []
 
 
-def fetch_tournament_detail(tag):
-    """Fetch detailed info for a single tournament by tag.
-
-    The detail API returns startedTime (actual start) and endedTime.
-
-    Args:
-        tag: Tournament tag (e.g., "#ABC123")
-
-    Returns:
-        dict with tournament details, or None if fetch failed
-    """
+async def fetch_tournament_detail_async(session, tag):
+    """Fetch detailed info for a single tournament by tag asynchronously."""
     encoded_tag = quote(tag, safe='')
-
     for attempt in range(2):
         try:
-            resp = get_http_session().get(
+            async with session.get(
                 f"{API_BASE}/tournaments/{encoded_tag}",
                 headers=get_api_headers(),
-                timeout=10
-            )
-            if resp.status_code == 200:
-                return resp.json()
-            elif resp.status_code == 429:
-                time.sleep(0.5 + attempt)
-                continue
+                timeout=API_TIMEOUT,
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                elif resp.status == 429:
+                    await asyncio.sleep(0.5 + attempt)
+                    continue
         except:
             pass
     return None
@@ -276,7 +252,7 @@ _DETAIL_CACHE_LOCK = threading.Lock()
 _DETAIL_CACHE = {}
 
 
-def _get_cached_tournament_detail(tag):
+async def _get_cached_tournament_detail_async(session, tag):
     ttl = int(os.environ.get("DETAIL_CACHE_TTL_SECONDS", 300))
     now = time.time()
 
@@ -285,26 +261,14 @@ def _get_cached_tournament_detail(tag):
         if cached and now < cached["expires_at"]:
             return cached["detail"]
 
-    detail = fetch_tournament_detail(tag)
+    detail = await fetch_tournament_detail_async(session, tag)
     if detail:
         with _DETAIL_CACHE_LOCK:
-            _DETAIL_CACHE[tag] = {"expires_at": now + ttl, "detail": detail}
+            _DETAIL_CACHE[tag] = {"expires_at": time.time() + ttl, "detail": detail}
     return detail
 
 
-def fetch_tournament_details_batch(tournaments, progress_cb=None, stop_event=None):
-    """Fetch details for multiple tournaments in parallel.
-
-    Gets accurate startedTime/endedTime from detail API.
-
-    Args:
-        tournaments: List of tournament dicts (must have 'tag' field)
-        progress_cb: Optional callable invoked with progress payloads
-        stop_event: Optional threading.Event to stop scheduling further work
-
-    Returns:
-        Same list with startedTime/endedTime added where available
-    """
+async def fetch_tournament_details_batch_async(tournaments, progress_cb=None, stop_event=None):
     if not tournaments:
         return tournaments
 
@@ -331,33 +295,37 @@ def fetch_tournament_details_batch(tournaments, progress_cb=None, stop_event=Non
 
     emit(force=True)
 
-    max_detail_workers = int(os.environ.get('DETAIL_WORKERS', 25))
-    with ThreadPoolExecutor(max_workers=min(max_detail_workers, len(tags))) as executor:
-        future_to_tag = {executor.submit(_get_cached_tournament_detail, tag): tag for tag in tags}
-        for future in as_completed(future_to_tag):
-            if stop_event and stop_event.is_set():
-                break
-            tag = future_to_tag[future]
-            detail = None
-            try:
-                detail = future.result()
-            except Exception:
-                detail = None
+    max_detail_workers = int(os.environ.get('DETAIL_WORKERS', 100))
 
-            tournament = by_tag.get(tag)
-            if tournament and detail:
-                if 'startedTime' in detail:
-                    tournament['startedTime'] = detail['startedTime']
-                if 'endedTime' in detail:
-                    tournament['endedTime'] = detail['endedTime']
+    async def fetch_and_update(tag, session, sem):
+        nonlocal completed
+        if stop_event and stop_event.is_set():
+            return
+        async with sem:
+            detail = await _get_cached_tournament_detail_async(session, tag)
 
-            completed += 1
-            emit()
+        tournament = by_tag.get(tag)
+        if tournament and detail:
+            if 'startedTime' in detail:
+                tournament['startedTime'] = detail['startedTime']
+            if 'endedTime' in detail:
+                tournament['endedTime'] = detail['endedTime']
+
+        completed += 1
+        emit()
+
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=get_ssl_context())) as session:
+        sem = asyncio.Semaphore(max_detail_workers)
+        tasks = [fetch_and_update(tag, session, sem) for tag in tags]
+        await asyncio.gather(*tasks)
 
     emit(force=True)
-
     return tournaments
 
+def fetch_tournament_details_batch(tournaments, progress_cb=None, stop_event=None):
+    if not tournaments:
+        return tournaments
+    return asyncio.run(fetch_tournament_details_batch_async(tournaments, progress_cb, stop_event))
 
 def fetch_tournament_details_for_in_progress(tournaments, progress_cb=None, stop_event=None):
     """Fetch details only for in-progress tournaments (startedTime matters there)."""
@@ -436,14 +404,7 @@ def get_cached_search_results(force_refresh=False):
             _SEARCH_CACHE_COND.notify_all()
 
 
-def fetch_all_tournaments(progress_cb=None, stop_event=None):
-    """Fetch tournaments with best coverage in reasonable time (~20-30s).
-
-    Strategy:
-    - All 2-letter combos (676) for broad coverage
-    - Common words in multiple languages for specific matches
-    - Drill down when hitting API limit (20 results)
-    """
+async def fetch_all_tournaments_async(progress_cb=None, stop_event=None):
     global search_stats
 
     # Reset stats for this search
@@ -455,7 +416,7 @@ def fetch_all_tournaments(progress_cb=None, stop_event=None):
         'tournaments_by_mode': defaultdict(int)
     }
 
-    logger.info("Starting tournament fetch...")
+    logger.info("Starting tournament fetch (asyncio)...")
     start_time = time.time()
 
     letters = 'abcdefghijklmnopqrstuvwxyz'
@@ -472,7 +433,7 @@ def fetch_all_tournaments(progress_cb=None, stop_event=None):
     cyrillic_letters = 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя'
     queries.extend(list(cyrillic_letters))
 
-    # Common tournament words (improves non-monotonic coverage)
+    # Common tournament words
     common_words = [
         'torneo', 'tornei', 'tourno', 'turnie', 'free', 'open', 'join',
         'clan', 'war', 'pro', 'noob', 'legend', 'champ', 'master', 'elite',
@@ -482,20 +443,22 @@ def fetch_all_tournaments(progress_cb=None, stop_event=None):
 
     all_tournaments = {}
     searched = set()
-    to_search = list(queries)
 
-    # Reduce workers on low-memory servers (Free tier = 512MB)
-    WORKERS = int(os.environ.get('SEARCH_WORKERS', 25))
+    # Increase workers since async I/O is very lightweight
+    WORKERS = int(os.environ.get('SEARCH_WORKERS', 100))
     max_latin_len = int(os.environ.get("MAX_QUERY_LEN", 4))
     max_cyrillic_len = int(os.environ.get("MAX_CYRILLIC_QUERY_LEN", 2))
 
     def drilldown_chars_and_limit(q):
-        # Prevent wasteful mixed-script drilldowns (e.g., "а" + "b").
         if any(ch in cyrillic_letters for ch in q):
             return list(cyrillic_letters + digits), max_cyrillic_len
         return latin_chars, max_latin_len
 
-    scheduled = 0
+    q = asyncio.Queue()
+    for query in queries:
+        q.put_nowait(query)
+
+    scheduled = q.qsize()
     completed = 0
     last_emit_ts = 0.0
 
@@ -508,7 +471,7 @@ def fetch_all_tournaments(progress_cb=None, stop_event=None):
             return
         last_emit_ts = now_ts
 
-        pending = (scheduled - completed) + len(to_search)
+        pending = (scheduled - completed)
         payload = {
             "phase": "crawl",
             "completed": completed,
@@ -522,49 +485,53 @@ def fetch_all_tournaments(progress_cb=None, stop_event=None):
             payload["message"] = message
         progress_cb(payload)
 
-    while to_search:
-        if stop_event and stop_event.is_set():
-            break
-        # Dedupe
-        batch = [q for q in to_search if q not in searched]
-        for q in batch:
-            searched.add(q)
+    async def worker(session, sem):
+        nonlocal completed, scheduled
+        while True:
+            try:
+                query = await q.get()
+            except asyncio.CancelledError:
+                break
 
-        if not batch:
-            break
+            if stop_event and stop_event.is_set():
+                q.task_done()
+                continue
 
-        to_search = []
+            if query in searched:
+                q.task_done()
+                continue
+            searched.add(query)
 
-        # Search in parallel
-        with ThreadPoolExecutor(max_workers=WORKERS) as executor:
-            future_to_query = {executor.submit(fetch_tournaments_by_query, q): q for q in batch}
-            scheduled += len(batch)
-            emit(force=True)
+            async with sem:
+                results = await fetch_tournaments_by_query_async(session, query)
 
-            for future in as_completed(future_to_query):
-                query = future_to_query[future]
-                try:
-                    result_list = future.result()
-                except Exception:
-                    result_list = []
+            for t in results:
+                all_tournaments[t['tag']] = t
 
-                completed += 1
+            chars, max_len = drilldown_chars_and_limit(query)
+            if len(results) >= 20 and len(query) < max_len:
+                search_stats['drill_downs'] += 1
+                for c in chars:
+                    new_q = query + c
+                    if new_q not in searched:
+                        q.put_nowait(new_q)
+                        scheduled += 1
 
-                for t in result_list:
-                    all_tournaments[t['tag']] = t
+            completed += 1
+            emit()
+            q.task_done()
 
-                # Drill down if we hit the limit. Use a script-aware alphabet and per-script max depth.
-                chars, max_len = drilldown_chars_and_limit(query)
-                if len(result_list) >= 20 and len(query) < max_len:
-                    search_stats['drill_downs'] += 1
-                    for c in chars:
-                        new_q = query + c
-                        if new_q not in searched:
-                            to_search.append(new_q)
+    emit(force=True)
 
-                emit()
+    connector = aiohttp.TCPConnector(limit=WORKERS, ssl=get_ssl_context())
+    async with aiohttp.ClientSession(connector=connector) as session:
+        sem = asyncio.Semaphore(WORKERS)
+        workers = [asyncio.create_task(worker(session, sem)) for _ in range(WORKERS)]
+        await q.join()
+        for w in workers:
+            w.cancel()
 
-        emit(force=True)
+    emit(force=True)
 
     elapsed = time.time() - start_time
 
@@ -585,6 +552,8 @@ def fetch_all_tournaments(progress_cb=None, stop_event=None):
 
     return list(all_tournaments.values())
 
+def fetch_all_tournaments(progress_cb=None, stop_event=None):
+    return asyncio.run(fetch_all_tournaments_async(progress_cb, stop_event))
 
 def parse_cr_time(time_str):
     """Parse CR API time format: 20260105T220549.000Z"""
