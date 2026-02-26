@@ -1139,6 +1139,7 @@ def api_get_config():
         "has_api_key": bool(api_key),
         "api_key_from_env": api_key_from_env,
         "masked_key": masked_key,
+        "shutdown_enabled": os.environ.get('FLASK_ENV') != 'production',
         "filters": config.get('filters', {})
     })
 
@@ -1169,8 +1170,12 @@ def api_heartbeat():
 
 
 @app.route('/api/shutdown', methods=['POST'])
+@login_required
 def api_shutdown():
     """Shutdown the server"""
+    if os.environ.get('FLASK_ENV') == 'production':
+        return jsonify({"error": "Shutdown disabled in production"}), 403
+
     def shutdown():
         time.sleep(0.5)
         os._exit(0)

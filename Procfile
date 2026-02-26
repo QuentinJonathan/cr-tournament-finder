@@ -1,1 +1,1 @@
-web: gunicorn wsgi:app --timeout 300 --workers 1
+web: gunicorn wsgi:app --worker-class gthread --workers ${WEB_CONCURRENCY:-2} --threads ${GUNICORN_THREADS:-4} --timeout ${GUNICORN_TIMEOUT:-180}

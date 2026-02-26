@@ -346,6 +346,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await resp.json();
 
             hasApiKey = data.has_api_key;
+            const shutdownEnabled = data.shutdown_enabled !== false;
+            if (shutdownBtn) {
+                shutdownBtn.classList.toggle('hidden', !shutdownEnabled);
+            }
 
             if (data.api_key_from_env) {
                 // API key is set via environment variable - hide entire section
@@ -1059,14 +1063,28 @@ document.addEventListener('DOMContentLoaded', () => {
     async function shutdownServer() {
         if (confirm('Shutdown the server?')) {
             try {
+                const resp = await fetch('/api/shutdown', { method: 'POST' });
+                if (!resp.ok) {
+                    let message = 'Shutdown is disabled.';
+                    try {
+                        const payload = await resp.json();
+                        if (payload && payload.error) {
+                            message = payload.error;
+                        }
+                    } catch {
+                        // Ignore invalid error body.
+                    }
+                    showToast(message);
+                    return;
+                }
+
                 clearInterval(heartbeatInterval);
-                await fetch('/api/shutdown', { method: 'POST' });
                 showToast('Server shutting down...');
                 setTimeout(() => {
                     document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:Inter,system-ui;color:#a0a0b0;background:#0d0d1a;"><div style="text-align:center;"><h2 style="color:#f4d03f;">Server stopped</h2><p>You can close this tab.</p></div></div>';
                 }, 500);
             } catch (err) {
-                showToast('Server stopped');
+                showToast('Shutdown failed');
             }
         }
     }
