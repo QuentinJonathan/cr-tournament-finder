@@ -244,7 +244,13 @@ The version bump triggers:
 ## Clash Royale API Notes
 
 - API key from https://developer.clashroyale.com (IP-locked)
-- Tournament search endpoint (`/tournaments?name=X`) behaves like a fuzzy search and still needs crawl coverage heuristics; the app treats ~20+ matches as a saturation signal for drill-down
+- Tournament search endpoint (`/tournaments?name=X`) — measured semantics (June 2026, via RoyaleAPI proxy):
+  - **Word-prefix matching**: a query matches if it is a prefix of any whitespace-separated word in the tournament name (`live` matches "a a a 5 **live**s", but `alive` does NOT match "aaalive"). Multi-word queries appear to OR their tokens.
+  - **Case-insensitive**, but **no accent/Unicode folding**: `cok` does NOT match "çok hawali"; exotic characters (ç, é, CJK, emoji) only match when queried with the exact character.
+  - **Response cap is exactly 20 items**; the `limit` query param is ignored and no paging cursors are returned even when capped — drill-down is the only way to get full coverage. The crawler's `QUERY_DRILLDOWN_THRESHOLD=20` matches this cap exactly.
+  - Capped responses are roughly recency-biased but not strictly sorted by `createdTime`.
+  - 1-character queries are accepted (no minimum length issue via the proxy).
+  - Coverage implication: tournaments whose every word starts with a non-probed character (accented latin, emoji, CJK) are invisible to the crawler. Measured on a live corpus of 161 tournaments: ~1.3% of word-starts are such characters, so the expected blind spot is ~1-2 tournaments at any time. A 37-probe spot-check found 0 tournaments missed by the crawler.
 - Tournament detail endpoint (`/tournaments/{tag}`) returns `startedTime` and `endedTime` fields not available in search
 - The `preparationDuration` field is the MAX prep time - hosts can start early
 - Tournament statuses: `inPreparation`, `inProgress`, `ended`
