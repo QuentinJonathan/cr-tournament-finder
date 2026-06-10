@@ -112,7 +112,9 @@ _SEARCH_CACHE = None
 _SEARCH_FETCH_IN_PROGRESS = False
 
 # Paths
-CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
+# CONFIG_PATH can point to a mounted persistent volume (e.g. GCS bucket on
+# Cloud Run) so saved defaults survive instance restarts.
+CONFIG_PATH = os.environ.get('CONFIG_PATH') or os.path.join(BASE_DIR, 'config.json')
 GAME_MODES_PATH = os.path.join(BASE_DIR, 'game_modes.json')
 
 # API

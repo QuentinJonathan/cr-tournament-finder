@@ -48,7 +48,10 @@ gcloud run deploy cr-tournament-finder \
   --concurrency 10 \
   --min-instances 0 \
   --max-instances 1 \
-  --set-env-vars "FLASK_ENV=production,SEARCH_WORKERS=25,DETAIL_WORKERS=50,VERIFY_WORKERS=5,MAX_VERIFICATION_PASSES=2,QUERY_DRILLDOWN_THRESHOLD=20" \
+  --execution-environment gen2 \
+  --add-volume name=config,type=cloud-storage,bucket=cr-tournament-finder-config \
+  --add-volume-mount volume=config,mount-path=/data \
+  --set-env-vars "FLASK_ENV=production,CONFIG_PATH=/data/config.json,SEARCH_WORKERS=25,DETAIL_WORKERS=50,VERIFY_WORKERS=5,MAX_VERIFICATION_PASSES=2,QUERY_DRILLDOWN_THRESHOLD=20" \
   --set-secrets "CR_API_KEY=cr-api-key:latest,CR_FINDER_PASSWORD=cr-finder-password:latest,FLASK_SECRET_KEY=flask-secret-key:latest"
 ```
 
@@ -60,6 +63,7 @@ gcloud run deploy cr-tournament-finder \
 #### Cloud Run Notes
 - Project: `cr-tournament-finder`
 - Region: `europe-west3` (Frankfurt)
+- **Persistent config**: GCS bucket `cr-tournament-finder-config` is mounted at `/data` (requires gen2 execution environment); `CONFIG_PATH=/data/config.json` makes saved filter defaults survive instance restarts and sync across all devices. The Cloud Run service account has `roles/storage.objectAdmin` on the bucket.
 - Current production tuning favors completeness over raw fan-out: `SEARCH_WORKERS=25`, `DETAIL_WORKERS=50`, `VERIFY_WORKERS=5`
 - The crawler now exposes a confidence signal (`high` / `medium` / `low`) plus unresolved and saturated query counts in the debug panel
 - Cold start ~5-10s when idle
