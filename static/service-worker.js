@@ -1,7 +1,7 @@
 // CR Tournament Finder - Service Worker
 // Provides offline caching for static assets
 
-const CACHE_NAME = 'cr-finder-v8';
+const CACHE_NAME = 'cr-finder-v16';
 const STATIC_ASSETS = [
     '/',
     '/static/style.css',
@@ -153,8 +153,8 @@ self.addEventListener('fetch', (event) => {
                                 <body>
                                     <div class="offline-container">
                                         <h1>Offline</h1>
-                                        <p>Die App benötigt eine Internetverbindung, um Turniere zu suchen.</p>
-                                        <button onclick="location.reload()">Erneut versuchen</button>
+                                        <p>An internet connection is required to search for tournaments.</p>
+                                        <button onclick="location.reload()">Try again</button>
                                     </div>
                                 </body>
                                 </html>`,

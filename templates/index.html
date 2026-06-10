@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>CR Tournament Finder</title>
+    <title>CR Tournament Finder — Draft Board</title>
     <meta name="description" content="Find and filter Clash Royale tournaments by game mode, level cap, and time remaining">
 
     <!-- PWA -->
@@ -17,225 +17,259 @@
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>🏆 Tournament Finder</h1>
-            <p class="subtitle">Find Clash Royale tournaments</p>
-            <button id="shutdown-btn" class="btn-shutdown" title="Stop server and close">✕ Shutdown</button>
-        </header>
-
-        <!-- API Key Management -->
-        <div id="api-key-section" class="card">
-            <div class="settings-header">
-                <h2>⚙️ API Key</h2>
-                <button id="toggle-key-section" class="btn-icon" title="Toggle">▼</button>
-            </div>
-            <div id="api-key-content">
-                <p>Get your key from <a href="https://developer.clashroyale.com" target="_blank">developer.clashroyale.com</a></p>
-
-                <div id="current-key-display" class="current-key hidden">
-                    <span class="key-label">Current key:</span>
-                    <code id="masked-key">Not set</code>
-                    <button id="change-key-btn" class="btn secondary small">Change</button>
-                </div>
-
-                <div id="key-input-section" class="input-group">
-                    <input type="password" id="api-key-input" placeholder="Paste your API key...">
-                    <button id="toggle-visibility" class="btn-icon" title="Show/Hide">👁</button>
-                    <button id="save-api-key" class="btn primary">Save</button>
-                </div>
-
-                <p class="key-hint">💡 API keys are IP-locked. Create a new key if your IP changes.</p>
-            </div>
-        </div>
-
-        <!-- Filters -->
-        <div id="filters-section" class="card">
-            <h2>Filters</h2>
-            <div class="filters-grid">
-                <div class="filter-group">
-                    <label for="tournament-type">Tournament Type</label>
-                    <select id="tournament-type">
-                        <option value="open" selected>Open Only</option>
-                        <option value="password">Password Protected</option>
-                        <option value="all">All</option>
-                    </select>
-                </div>
-
-                <div class="filter-group">
-                    <label for="status">Status</label>
-                    <select id="status">
-                        <option value="all" selected>All</option>
-                        <option value="inProgress">In Progress</option>
-                        <option value="inPreparation">In Preparation</option>
-                    </select>
-                </div>
-
-                <div class="filter-group" style="grid-column: 1 / -1;">
-                    <label>Game Mode</label>
-                    <div id="game-mode-pills" class="pill-group">
-                        <!-- Populated by JS -->
-                    </div>
-                </div>
-
-                <div class="filter-group">
-                    <label>Level Cap</label>
-                    <div id="level-cap-toggles" class="toggle-group">
-                        <button type="button" class="toggle-btn" data-value="11">11</button>
-                        <button type="button" class="toggle-btn" data-value="12">12</button>
-                        <button type="button" class="toggle-btn" data-value="13">13</button>
-                        <button type="button" class="toggle-btn" data-value="14">14</button>
-                        <button type="button" class="toggle-btn" data-value="15">15</button>
-                        <button type="button" class="toggle-btn" data-value="16">16</button>
-                    </div>
-                </div>
-
-                <div class="filter-group">
-                    <label for="min-players">Min Players</label>
-                    <input type="number" id="min-players" min="0" value="0">
-                </div>
-
-                <div class="filter-group">
-                    <label for="max-players">Max Players</label>
-                    <input type="number" id="max-players" min="0" placeholder="No limit">
-                </div>
-
-                <div class="filter-group">
-                    <label for="min-remaining">Min Time Left (min)</label>
-                    <input type="number" id="min-remaining" min="0" value="0">
-                </div>
-
-                <div class="filter-group">
-                    <label for="max-remaining">Max Time Left (min)</label>
-                    <input type="number" id="max-remaining" min="0" placeholder="No limit">
+    <div class="db-app" id="app">
+        <!-- Sidebar -->
+        <aside class="db-sidebar" id="sidebar">
+            <div class="db-brand">
+                <span class="db-brand-text">
+                    <span class="db-brand-crest">♛</span>
+                    CR.draft
+                </span>
+                <div class="db-brand-actions">
+                    <button class="db-icon-btn" id="settings-btn" title="Settings">⚙</button>
+                    <button class="db-icon-btn db-sidebar-close" id="sidebar-close" title="Close">✕</button>
                 </div>
             </div>
 
-            <div class="filter-actions">
-                <button id="clear-filters-btn" class="btn ghost">Clear Filters</button>
-                <button id="search-btn" class="btn primary large">
-                    <span class="btn-text">Search Tournaments<span id="filter-badge" class="filter-badge hidden">0</span></span>
-                    <span class="btn-loading hidden">
-                        <span class="spinner"></span>
-                        Searching...
-                    </span>
+            <div class="db-sidebar-scroll">
+                <div class="db-label">Saved views</div>
+                <div class="db-views" id="saved-views"></div>
+
+                <div class="db-label">Mode</div>
+                <div class="db-modes" id="mode-checks"></div>
+
+                <div class="db-label">Level cap</div>
+                <div class="db-levels" id="level-caps">
+                    <button type="button" class="db-lvl" data-value="11">11</button>
+                    <button type="button" class="db-lvl" data-value="12">12</button>
+                    <button type="button" class="db-lvl" data-value="13">13</button>
+                    <button type="button" class="db-lvl" data-value="14">14</button>
+                    <button type="button" class="db-lvl" data-value="15">15</button>
+                    <button type="button" class="db-lvl" data-value="16">16</button>
+                </div>
+
+                <div class="db-label">Players (min)</div>
+                <input type="number" id="min-players" class="db-input" min="0" value="0">
+
+                <div class="db-label">Time left (min)</div>
+                <div class="db-range">
+                    <input type="number" id="min-remaining" class="db-input" min="0" placeholder="min">
+                    <input type="number" id="max-remaining" class="db-input" min="0" placeholder="max">
+                </div>
+
+                <div class="db-label">Access</div>
+                <div class="db-access" id="access-radio">
+                    <label class="db-radio"><input type="radio" name="access" value="any" checked><span class="db-dot"></span>Any</label>
+                    <label class="db-radio"><input type="radio" name="access" value="open"><span class="db-dot"></span>🌐 Open only</label>
+                    <label class="db-radio"><input type="radio" name="access" value="password"><span class="db-dot"></span>🔒 Password</label>
+                </div>
+
+                <div class="db-filter-actions">
+                    <button class="db-clear" id="clear-filters-btn">Clear filters</button>
+                    <button class="db-save" id="save-defaults-btn">Save as defaults</button>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main list -->
+        <section class="db-main">
+            <!-- Progress bar (SSE) -->
+            <div class="db-progress hidden" id="search-progress" aria-live="polite">
+                <span class="db-progress-text" id="progress-text">Searching…</span>
+                <div class="db-progress-track">
+                    <div class="db-progress-fill" id="progress-fill"></div>
+                </div>
+                <span class="db-progress-metrics" id="progress-metrics"></span>
+            </div>
+
+            <!-- Toolbar -->
+            <div class="db-toolbar">
+                <button class="db-icon-btn db-hamburger" id="sidebar-open" title="Filters" aria-label="Open filters">☰</button>
+                <div class="db-search">
+                    <span class="db-search-icon">🔍</span>
+                    <input type="text" id="search-input" placeholder="Search name, tag, or mode…" autocomplete="off">
+                    <span class="db-kbd">⌘K</span>
+                </div>
+                <div class="db-quick-group" aria-label="Quick filters">
+                    <button class="db-pill" id="quick-live" data-quick="live">LIVE</button>
+                    <button class="db-pill" id="quick-prep" data-quick="prep">PREP</button>
+                </div>
+                <span class="db-toolbar-sep"></span>
+                <div class="db-meta" id="results-meta">
+                    <span class="db-meta-dot"></span>
+                    <span id="results-count-text">0 results</span>
+                    <span class="db-meta-sep">·</span>
+                    <span id="fetch-age">—</span>
+                </div>
+                <button class="db-pill" id="auto-refresh-btn" title="Auto-refresh every ~3 minutes while the tab is visible">AUTO</button>
+                <button class="db-refresh" id="refresh-btn" title="Refresh (Shift-click: force full re-crawl)" aria-label="Refresh tournaments">
+                    <span class="db-refresh-icon" aria-hidden="true">↻</span>
+                    <span class="db-refresh-label">Refresh</span>
                 </button>
-                <button id="save-defaults-btn" class="btn secondary">Save as Defaults</button>
-            </div>
-        </div>
-
-        <!-- Status Message -->
-        <div id="status-message" class="status-message hidden"></div>
-
-        <!-- Search Progress (SSE) -->
-        <div id="search-progress" class="search-progress hidden" aria-live="polite">
-            <div class="search-progress-head">
-                <span id="progress-phase" class="progress-phase">Preparing...</span>
-                <span id="progress-metrics" class="progress-metrics">0%</span>
-            </div>
-            <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-                <div id="progress-bar-fill" class="progress-bar-fill"></div>
-            </div>
-            <div id="progress-detail" class="progress-detail"></div>
-        </div>
-
-        <!-- Fetch Time Indicator -->
-        <div id="fetch-time-indicator" class="fetch-time-indicator hidden">
-            <span id="fetch-time-text">Data fetched: --</span>
-            <button id="refresh-data-btn" class="btn secondary small" title="Fetch fresh data">Refresh</button>
-        </div>
-
-        <!-- Results -->
-        <div id="results-section" class="card hidden">
-            <h2>Results <span id="results-count"></span></h2>
-
-            <!-- Desktop Table -->
-            <div class="table-container desktop-only">
-                <table id="results-table">
-                    <thead>
-                        <tr>
-                            <th>Name</th>
-                            <th>Mode</th>
-                            <th>Players</th>
-                            <th>Level</th>
-                            <th>Status</th>
-                            <th>Running</th>
-                            <th>Time Left</th>
-                            <th>Tag</th>
-                            <th>Join</th>
-                        </tr>
-                    </thead>
-                    <tbody id="results-body">
-                        <!-- Populated by JS -->
-                    </tbody>
-                </table>
             </div>
 
-            <!-- Mobile Cards -->
-            <div id="results-cards" class="results-cards mobile-only">
-                <!-- Populated by JS -->
+            <!-- Table head -->
+            <div class="db-thead" id="thead">
+                <div class="db-th" data-sort="name">Tournament <span class="db-sort-ind"></span></div>
+                <div class="db-th" data-sort="mode">Mode <span class="db-sort-ind"></span></div>
+                <div class="db-th db-th-right" data-sort="players">Players <span class="db-sort-ind"></span></div>
+                <div class="db-th db-th-right" data-sort="level">Lvl <span class="db-sort-ind"></span></div>
+                <div class="db-th db-th-right" data-sort="endsIn">Ends in <span class="db-sort-ind"></span></div>
+                <div class="db-th db-th-right" data-sort="status">Status <span class="db-sort-ind"></span></div>
+                <div class="db-th db-th-right">Action</div>
             </div>
-        </div>
 
-        <!-- Toast for copy notification -->
-        <div id="toast" class="toast hidden">Copied!</div>
+            <!-- Rows -->
+            <div class="db-rows" id="rows"></div>
 
-        <!-- Debug Section -->
-        <div id="debug-section" class="card debug-card">
-            <div class="debug-header">
-                <h2>🔍 Debug Log</h2>
-                <button id="toggle-debug" class="btn-icon" title="Toggle">▼</button>
+            <!-- Empty state -->
+            <div class="db-empty hidden" id="empty-state">
+                <div class="db-empty-icon">🔎</div>
+                <div class="db-empty-title" id="empty-title">No tournaments match these filters</div>
+                <div class="db-empty-sub" id="empty-sub">Try widening level cap or clearing filters.</div>
             </div>
-            <div id="debug-content" class="collapsed">
-                <!-- Stats from last search -->
-                <div id="debug-stats" class="debug-stats hidden">
-                    <h3>Last Search Stats</h3>
-                    <div class="stats-grid">
-                        <div class="stat-item">
-                            <span class="stat-label">Queries:</span>
-                            <span id="stat-queries">-</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">Drill-downs:</span>
-                            <span id="stat-drilldowns">-</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">Rate Limits:</span>
-                            <span id="stat-ratelimits">-</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">API Errors:</span>
-                            <span id="stat-errors">-</span>
+        </section>
+
+        <!-- Detail panel -->
+        <aside class="db-detail hidden" id="detail-panel" aria-live="polite">
+            <div class="db-detail-scroll">
+                <div class="db-detail-head">
+                    <div class="db-detail-meta">
+                        <span class="db-tag" id="detail-tag">#—</span>
+                        <button class="db-icon-btn" id="detail-copy" title="Copy tag">📋</button>
+                        <span class="db-detail-lock hidden" id="detail-lock">🔒 Password</span>
+                        <button class="db-icon-btn db-detail-close" id="detail-close" title="Close">✕</button>
+                    </div>
+                    <div class="db-detail-title-row">
+                        <h2 class="db-detail-name" id="detail-name">Select a tournament</h2>
+                        <button class="db-fav-big" id="detail-fav" title="Favorite">★</button>
+                    </div>
+                </div>
+
+                <div class="db-countdown" id="detail-countdown-card">
+                    <div class="db-countdown-label" id="detail-countdown-label">Time Remaining</div>
+                    <div class="db-countdown-value" id="detail-countdown-value">00:00</div>
+                    <div class="db-countdown-bar">
+                        <div class="db-countdown-bar-fill" id="detail-countdown-bar"></div>
+                    </div>
+                </div>
+
+                <div class="db-stats">
+                    <div class="db-stat">
+                        <div class="db-stat-label">Players</div>
+                        <div class="db-stat-value" id="detail-players">—</div>
+                        <div class="db-stat-sub" id="detail-players-sub">—</div>
+                    </div>
+                    <div class="db-stat">
+                        <div class="db-stat-label">Level Cap</div>
+                        <div class="db-stat-value" id="detail-level">—</div>
+                        <div class="db-stat-sub">Max tower lvl</div>
+                    </div>
+                    <div class="db-stat">
+                        <div class="db-stat-label">Mode</div>
+                        <div class="db-stat-value" id="detail-mode">—</div>
+                        <div class="db-stat-sub">Game mode</div>
+                    </div>
+                    <div class="db-stat">
+                        <div class="db-stat-label">Access</div>
+                        <div class="db-stat-value" id="detail-access">—</div>
+                        <div class="db-stat-sub" id="detail-access-sub">—</div>
+                    </div>
+                </div>
+
+                <div class="db-host-section">
+                    <div class="db-label">Timing</div>
+                    <div class="db-host-card">
+                        <div class="db-host-avatar" id="detail-timing-icon">⏱</div>
+                        <div class="db-host-meta">
+                            <div class="db-host-name" id="detail-timing-line">—</div>
+                            <div class="db-host-sub" id="detail-timing-sub">—</div>
                         </div>
                     </div>
-                    <div id="mode-breakdown" class="mode-breakdown">
-                        <h4>Tournaments by Game Mode (before filters)</h4>
+                </div>
+
+                <div class="db-flex-fill"></div>
+
+                <a id="detail-join" href="#" target="_blank" rel="noopener" class="db-join-big">⚔ JOIN TOURNAMENT</a>
+                <div class="db-detail-actions">
+                    <button class="db-action-btn" id="detail-fav-btn">☆ Favorite</button>
+                    <button class="db-action-btn" id="detail-copy-btn">📋 Copy tag</button>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Overlay backdrops -->
+        <div class="db-backdrop hidden" id="sidebar-backdrop"></div>
+        <div class="db-backdrop hidden" id="detail-backdrop"></div>
+
+        <!-- Toast -->
+        <div class="db-toast hidden" id="toast"></div>
+
+        <!-- Settings drawer -->
+        <div class="db-settings hidden" id="settings-drawer">
+            <div class="db-settings-head">
+                <h3>⚙ Settings</h3>
+                <button class="db-icon-btn" id="settings-close">✕</button>
+            </div>
+            <div class="db-settings-body">
+                <div class="db-settings-section">
+                    <div class="db-label">API Key</div>
+                    <p class="db-settings-hint">Get your key from <a href="https://developer.clashroyale.com" target="_blank" rel="noopener">developer.clashroyale.com</a>. Keys are IP-locked.</p>
+                    <div class="db-key-row hidden" id="key-current-row">
+                        <span class="db-key-label">Current:</span>
+                        <code class="db-key-code" id="masked-key">—</code>
+                        <button class="db-action-btn" id="change-key-btn">Change</button>
+                    </div>
+                    <div class="db-key-input-row" id="key-input-row">
+                        <input type="password" id="api-key-input" class="db-input" placeholder="Paste your API key…" autocomplete="off">
+                        <button class="db-icon-btn" id="toggle-visibility" title="Show/hide">👁</button>
+                        <button class="db-action-btn db-action-primary" id="save-api-key">Save</button>
+                    </div>
+                </div>
+
+                <div class="db-settings-section">
+                    <div class="db-label">Last search stats</div>
+                    <div class="db-stats-grid" id="debug-stats">
+                        <div class="db-kv"><span>Queries</span><em id="stat-queries">—</em></div>
+                        <div class="db-kv"><span>Confidence</span><em id="stat-confidence">—</em></div>
+                        <div class="db-kv"><span>Retried</span><em id="stat-retried">—</em></div>
+                        <div class="db-kv"><span>Drill-downs</span><em id="stat-drilldowns">—</em></div>
+                        <div class="db-kv"><span>429s</span><em id="stat-ratelimits">—</em></div>
+                        <div class="db-kv"><span>Errors</span><em id="stat-errors">—</em></div>
+                        <div class="db-kv"><span>Verify passes</span><em id="stat-verification-passes">—</em></div>
+                        <div class="db-kv"><span>Unresolved</span><em id="stat-failed-queries">—</em></div>
+                        <div class="db-kv"><span>Saturated</span><em id="stat-saturated-queries">—</em></div>
+                    </div>
+                    <div class="db-mode-breakdown hidden" id="mode-breakdown">
+                        <div class="db-label">Tournaments by mode</div>
                         <div id="mode-list"></div>
                     </div>
                 </div>
 
-                <!-- Tag Search -->
-                <div class="tag-search">
-                    <h3>Search Log for Tag</h3>
-                    <p>Check if a specific tournament was found</p>
-                    <div class="tag-search-input">
-                        <input type="text" id="tag-search-input" placeholder="#ABC123">
-                        <button id="tag-search-btn" class="btn secondary">Search</button>
+                <div class="db-settings-section">
+                    <div class="db-label">Log search</div>
+                    <div class="db-key-input-row">
+                        <input type="text" id="tag-search-input" class="db-input" placeholder="#ABC123">
+                        <button class="db-action-btn" id="tag-search-btn">Search log</button>
                     </div>
-                    <div id="tag-search-result" class="tag-search-result hidden"></div>
+                    <div class="db-log-result hidden" id="tag-search-result"></div>
                 </div>
 
-                <!-- Log Viewer -->
-                <div class="log-viewer">
-                    <div class="log-header">
-                        <h3>Recent Log Entries</h3>
-                        <button id="refresh-logs-btn" class="btn secondary small">Refresh</button>
+                <div class="db-settings-section">
+                    <div class="db-label-row">
+                        <div class="db-label">Recent log entries</div>
+                        <button class="db-action-btn" id="refresh-logs-btn">Refresh</button>
                     </div>
-                    <pre id="log-output">Click "Refresh" to load logs...</pre>
+                    <pre class="db-log-output" id="log-output">Click "Refresh" to load logs…</pre>
+                </div>
+
+                <div class="db-settings-section">
+                    <button class="db-action-btn db-action-danger hidden" id="shutdown-btn">✕ Shutdown server</button>
+                    <a class="db-action-btn" href="/logout">Logout</a>
                 </div>
             </div>
         </div>

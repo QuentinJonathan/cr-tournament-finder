@@ -20,6 +20,7 @@ env/
 config.json
 logs/
 *.log
+scratch/
 
 # OS
 .DS_Store
@@ -28,3 +29,4 @@ Thumbs.db
 # Test files (optional, remove if you want to include them)
 # test_*.py
 # *_test.py
+.vercel

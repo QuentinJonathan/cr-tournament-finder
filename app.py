@@ -87,14 +87,24 @@ if not logger.handlers:
 # ASYNC API CLIENT CONFIGURATION
 # =============================================================================
 
+def make_search_stats():
+    """Build a fresh mutable stats container for one crawl."""
+    return {
+        'queries_completed': 0,
+        'queries_retried': 0,
+        'drill_downs': 0,
+        'rate_limits': 0,
+        'api_errors': 0,
+        'failed_queries': 0,
+        'verification_passes': 0,
+        'saturated_queries': 0,
+        'search_confidence': 'unknown',
+        'tournaments_by_mode': defaultdict(int)
+    }
+
+
 # Search statistics (reset per search)
-search_stats = {
-    'queries_completed': 0,
-    'drill_downs': 0,
-    'rate_limits': 0,
-    'api_errors': 0,
-    'tournaments_by_mode': defaultdict(int)
-}
+search_stats = make_search_stats()
 
 # Cached crawler results (search API) to avoid repeated heavy crawls across requests.
 _SEARCH_CACHE_COND = threading.Condition()
@@ -113,6 +123,33 @@ def get_ssl_context():
 API_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 API_BASE = "https://proxy.royaleapi.dev/v1"
+
+
+def get_retry_delay_seconds(attempt, response=None):
+    """Return a conservative backoff delay for transient API failures."""
+    retry_after = 0.0
+    if response is not None:
+        retry_after_header = response.headers.get("Retry-After")
+        if retry_after_header:
+            try:
+                retry_after = float(retry_after_header)
+            except ValueError:
+                retry_after = 0.0
+
+    backoff = min(5.0, 0.75 * (2 ** attempt))
+    return max(retry_after, backoff)
+
+
+def compute_search_confidence(stats):
+    """Classify how trustworthy the crawl result is."""
+    failed_queries = int(stats.get("failed_queries", 0) or 0)
+    saturated_queries = int(stats.get("saturated_queries", 0) or 0)
+
+    if failed_queries == 0 and saturated_queries == 0:
+        return "high"
+    if failed_queries == 0:
+        return "medium"
+    return "low"
 
 # Load game modes
 def load_game_modes():
@@ -200,10 +237,11 @@ async def validate_api_access_async():
 def validate_api_access():
     return asyncio.run(validate_api_access_async())
 
-async def fetch_tournaments_by_query_async(session, query):
+async def fetch_tournaments_by_query_async(session, query, stats):
     """Fetch tournaments matching a query string asynchronously with retry on failure"""
-    global search_stats
-    for attempt in range(2):
+    max_attempts = 4
+    last_status = None
+    for attempt in range(max_attempts):
         try:
             async with session.get(
                 f"{API_BASE}/tournaments",
@@ -211,27 +249,65 @@ async def fetch_tournaments_by_query_async(session, query):
                 params={"name": query, "limit": 100},
                 timeout=API_TIMEOUT,
             ) as resp:
+                last_status = resp.status
                 if resp.status == 200:
                     data = await resp.json()
-                    search_stats['queries_completed'] += 1
-                    return data.get("items", [])
+                    stats['queries_completed'] += 1
+                    return {
+                        "ok": True,
+                        "items": data.get("items", []),
+                        "attempts": attempt + 1,
+                        "status": resp.status,
+                    }
                 elif resp.status == 429:
-                    search_stats['rate_limits'] += 1
-                    await asyncio.sleep(0.5 + attempt)
+                    stats['rate_limits'] += 1
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(get_retry_delay_seconds(attempt, resp))
+                        continue
+                    logger.debug(f"API rate limit for query '{query}' after {max_attempts} attempts")
+                    return {
+                        "ok": False,
+                        "items": [],
+                        "attempts": attempt + 1,
+                        "status": resp.status,
+                    }
+                elif 500 <= resp.status < 600 and attempt < max_attempts - 1:
+                    await asyncio.sleep(get_retry_delay_seconds(attempt, resp))
                     continue
                 else:
-                    search_stats['api_errors'] += 1
+                    stats['api_errors'] += 1
                     logger.debug(f"API error for query '{query}': HTTP {resp.status}")
+                    return {
+                        "ok": False,
+                        "items": [],
+                        "attempts": attempt + 1,
+                        "status": resp.status,
+                    }
         except Exception as e:
-            search_stats['api_errors'] += 1
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(get_retry_delay_seconds(attempt))
+                continue
+            stats['api_errors'] += 1
             logger.debug(f"Request error for query '{query}': {e}")
-    return []
+            return {
+                "ok": False,
+                "items": [],
+                "attempts": attempt + 1,
+                "status": None,
+            }
+    return {
+        "ok": False,
+        "items": [],
+        "attempts": max_attempts,
+        "status": last_status,
+    }
 
 
 async def fetch_tournament_detail_async(session, tag):
     """Fetch detailed info for a single tournament by tag asynchronously."""
     encoded_tag = quote(tag, safe='')
-    for attempt in range(2):
+    max_attempts = 4
+    for attempt in range(max_attempts):
         try:
             async with session.get(
                 f"{API_BASE}/tournaments/{encoded_tag}",
@@ -241,10 +317,17 @@ async def fetch_tournament_detail_async(session, tag):
                 if resp.status == 200:
                     return await resp.json()
                 elif resp.status == 429:
-                    await asyncio.sleep(0.5 + attempt)
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(get_retry_delay_seconds(attempt, resp))
+                        continue
+                    return None
+                elif 500 <= resp.status < 600 and attempt < max_attempts - 1:
+                    await asyncio.sleep(get_retry_delay_seconds(attempt, resp))
                     continue
-        except:
-            pass
+        except Exception:
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(get_retry_delay_seconds(attempt))
+                continue
     return None
 
 
@@ -295,7 +378,7 @@ async def fetch_tournament_details_batch_async(tournaments, progress_cb=None, st
 
     emit(force=True)
 
-    max_detail_workers = int(os.environ.get('DETAIL_WORKERS', 100))
+    max_detail_workers = int(os.environ.get('DETAIL_WORKERS', 50))
 
     async def fetch_and_update(tag, session, sem):
         nonlocal completed
@@ -341,16 +424,43 @@ def _snapshot_search_stats():
     # Make the defaultdict JSON-friendly and avoid accidental mutation.
     return {
         "queries_completed": int(search_stats.get("queries_completed", 0)),
+        "queries_retried": int(search_stats.get("queries_retried", 0)),
         "drill_downs": int(search_stats.get("drill_downs", 0)),
         "rate_limits": int(search_stats.get("rate_limits", 0)),
         "api_errors": int(search_stats.get("api_errors", 0)),
+        "failed_queries": int(search_stats.get("failed_queries", 0)),
+        "verification_passes": int(search_stats.get("verification_passes", 0)),
+        "saturated_queries": int(search_stats.get("saturated_queries", 0)),
+        "search_confidence": str(search_stats.get("search_confidence", "unknown")),
         "tournaments_by_mode": dict(search_stats.get("tournaments_by_mode", {})),
     }
 
 
+def build_search_stats_payload(stats):
+    """Convert internal search stats to the frontend response format."""
+    return {
+        "queries": stats.get("queries_completed", 0),
+        "retriedQueries": stats.get("queries_retried", 0),
+        "drillDowns": stats.get("drill_downs", 0),
+        "rateLimits": stats.get("rate_limits", 0),
+        "apiErrors": stats.get("api_errors", 0),
+        "failedQueries": stats.get("failed_queries", 0),
+        "verificationPasses": stats.get("verification_passes", 0),
+        "saturatedQueries": stats.get("saturated_queries", 0),
+        "confidence": stats.get("search_confidence", "unknown"),
+        "tournamentsByMode": stats.get("tournaments_by_mode", {}),
+    }
+
+
+def has_prior_crawl():
+    """True if any crawl (even a stale one) has succeeded since startup."""
+    with _SEARCH_CACHE_COND:
+        return _SEARCH_CACHE is not None
+
+
 def get_fresh_search_cache():
     """Return the cached crawler result if it's still fresh, else None."""
-    ttl = int(os.environ.get("SEARCH_CACHE_TTL_SECONDS", 60))
+    ttl = int(os.environ.get("SEARCH_CACHE_TTL_SECONDS", 180))
     if ttl <= 0:
         return None
     with _SEARCH_CACHE_COND:
@@ -364,7 +474,7 @@ def get_cached_search_results(force_refresh=False):
     """Fetch tournaments via the crawler, with an in-memory TTL cache and in-flight dedupe."""
     global _SEARCH_CACHE, _SEARCH_FETCH_IN_PROGRESS
 
-    ttl = int(os.environ.get("SEARCH_CACHE_TTL_SECONDS", 60))  # 0 disables cache reuse (but still dedupes in-flight)
+    ttl = int(os.environ.get("SEARCH_CACHE_TTL_SECONDS", 180))  # 0 disables cache reuse (but still dedupes in-flight)
 
     with _SEARCH_CACHE_COND:
         now = time.time()
@@ -405,16 +515,8 @@ def get_cached_search_results(force_refresh=False):
 
 
 async def fetch_all_tournaments_async(progress_cb=None, stop_event=None):
-    global search_stats
-
-    # Reset stats for this search
-    search_stats = {
-        'queries_completed': 0,
-        'drill_downs': 0,
-        'rate_limits': 0,
-        'api_errors': 0,
-        'tournaments_by_mode': defaultdict(int)
-    }
+    # Per-crawl stats container (local, so concurrent crawls can't corrupt each other)
+    stats = make_search_stats()
 
     logger.info("Starting tournament fetch (asyncio)...")
     start_time = time.time()
@@ -422,9 +524,13 @@ async def fetch_all_tournaments_async(progress_cb=None, stop_event=None):
     letters = 'abcdefghijklmnopqrstuvwxyz'
     digits = '0123456789'
     latin_chars = list(letters + digits)
+    drilldown_threshold = int(os.environ.get("QUERY_DRILLDOWN_THRESHOLD", 20))
 
-    # 2-letter combinations (676)
+    # 2-letter combinations (676) remain the main coverage backbone.
     queries = [a + b for a in letters for b in letters]
+
+    # Single-letter latin queries catch one-character tournament names.
+    queries.extend(list(letters))
 
     # Single digits
     queries.extend(list(digits))
@@ -432,6 +538,13 @@ async def fetch_all_tournaments_async(progress_cb=None, stop_event=None):
     # Cyrillic letters (33) for Russian tournament names
     cyrillic_letters = 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя'
     queries.extend(list(cyrillic_letters))
+
+    # Arabic script coverage for tournament names such as "صالح".
+    arabic_letters = ''.join(dict.fromkeys('ءآأؤإئابتثجحخدذرزسشصضطظعغفقكلمنهويىةپچژکگھہیے'))
+    arabic_digits = '٠١٢٣٤٥٦٧٨٩'
+    arabic_chars = list(arabic_letters + arabic_digits + digits)
+    queries.extend(list(arabic_letters))
+    queries.extend(list(arabic_digits))
 
     # Common tournament words
     common_words = [
@@ -442,27 +555,30 @@ async def fetch_all_tournaments_async(progress_cb=None, stop_event=None):
     queries.extend(common_words)
 
     all_tournaments = {}
-    searched = set()
+    successful_queries = set()
+    retried_queries = set()
+    saturated_queries = set()
 
     # Increase workers since async I/O is very lightweight
-    WORKERS = int(os.environ.get('SEARCH_WORKERS', 100))
+    # The Royale API proxy starts dropping query coverage aggressively at 100 workers.
+    # A lower default keeps the crawl slower but materially more complete.
+    WORKERS = int(os.environ.get('SEARCH_WORKERS', 25))
+    VERIFY_WORKERS = int(os.environ.get('VERIFY_WORKERS', 5))
+    MAX_VERIFICATION_PASSES = int(os.environ.get('MAX_VERIFICATION_PASSES', 2))
     max_latin_len = int(os.environ.get("MAX_QUERY_LEN", 4))
     max_cyrillic_len = int(os.environ.get("MAX_CYRILLIC_QUERY_LEN", 2))
+    max_arabic_len = int(os.environ.get("MAX_ARABIC_QUERY_LEN", 3))
 
     def drilldown_chars_and_limit(q):
+        if any(ch in arabic_letters or ch in arabic_digits for ch in q):
+            return arabic_chars, max_arabic_len
         if any(ch in cyrillic_letters for ch in q):
             return list(cyrillic_letters + digits), max_cyrillic_len
         return latin_chars, max_latin_len
 
-    q = asyncio.Queue()
-    for query in queries:
-        q.put_nowait(query)
-
-    scheduled = q.qsize()
-    completed = 0
     last_emit_ts = 0.0
 
-    def emit(force=False, message=None):
+    def emit(phase, completed, scheduled, force=False, message=None, unresolved=None):
         nonlocal last_emit_ts
         if not progress_cb:
             return
@@ -473,82 +589,152 @@ async def fetch_all_tournaments_async(progress_cb=None, stop_event=None):
 
         pending = (scheduled - completed)
         payload = {
-            "phase": "crawl",
+            "phase": phase,
             "completed": completed,
             "pending": pending,
             "uniqueFound": len(all_tournaments),
-            "drillDowns": search_stats.get('drill_downs', 0),
-            "rateLimits": search_stats.get('rate_limits', 0),
-            "apiErrors": search_stats.get('api_errors', 0),
+            "drillDowns": stats.get('drill_downs', 0),
+            "rateLimits": stats.get('rate_limits', 0),
+            "apiErrors": stats.get('api_errors', 0),
+            "retriedQueries": len(retried_queries),
+            "verificationPasses": stats.get('verification_passes', 0),
+            "saturatedQueries": len(saturated_queries),
         }
+        if unresolved is not None:
+            payload["unresolvedQueries"] = unresolved
         if message:
             payload["message"] = message
         progress_cb(payload)
 
-    async def worker(session, sem):
-        nonlocal completed, scheduled
-        while True:
-            try:
-                query = await q.get()
-            except asyncio.CancelledError:
-                break
+    async def run_query_phase(session, initial_queries, phase, worker_count, message=None):
+        q = asyncio.Queue()
+        queued = set()
+        unresolved = set()
+        scheduled = 0
+        completed = 0
 
-            if stop_event and stop_event.is_set():
-                q.task_done()
-                continue
+        def enqueue(query):
+            nonlocal scheduled
+            if query in successful_queries or query in queued:
+                return
+            queued.add(query)
+            q.put_nowait(query)
+            scheduled += 1
 
-            if query in searched:
-                q.task_done()
-                continue
-            searched.add(query)
+        for query in initial_queries:
+            enqueue(query)
 
-            async with sem:
-                results = await fetch_tournaments_by_query_async(session, query)
+        emit(phase, completed, scheduled, force=True, message=message, unresolved=len(unresolved))
 
-            for t in results:
-                all_tournaments[t['tag']] = t
+        sem = asyncio.Semaphore(worker_count)
 
-            chars, max_len = drilldown_chars_and_limit(query)
-            if len(results) >= 20 and len(query) < max_len:
-                search_stats['drill_downs'] += 1
-                for c in chars:
-                    new_q = query + c
-                    if new_q not in searched:
-                        q.put_nowait(new_q)
-                        scheduled += 1
+        async def worker():
+            nonlocal completed
+            while True:
+                try:
+                    query = await q.get()
+                except asyncio.CancelledError:
+                    break
 
-            completed += 1
-            emit()
-            q.task_done()
+                try:
+                    if stop_event and stop_event.is_set():
+                        continue
 
-    emit(force=True)
+                    if query in successful_queries:
+                        continue
 
-    connector = aiohttp.TCPConnector(limit=WORKERS, ssl=get_ssl_context())
-    async with aiohttp.ClientSession(connector=connector) as session:
-        sem = asyncio.Semaphore(WORKERS)
-        workers = [asyncio.create_task(worker(session, sem)) for _ in range(WORKERS)]
+                    async with sem:
+                        result = await fetch_tournaments_by_query_async(session, query, stats)
+
+                    if not result.get("ok"):
+                        unresolved.add(query)
+                        continue
+
+                    successful_queries.add(query)
+                    if result.get("attempts", 1) > 1:
+                        retried_queries.add(query)
+
+                    results = result.get("items", [])
+                    for t in results:
+                        all_tournaments[t['tag']] = t
+
+                    chars, max_len = drilldown_chars_and_limit(query)
+                    if len(results) >= drilldown_threshold:
+                        if len(query) < max_len:
+                            stats['drill_downs'] += 1
+                            for c in chars:
+                                enqueue(query + c)
+                        else:
+                            saturated_queries.add(query)
+                finally:
+                    completed += 1
+                    emit(phase, completed, scheduled, unresolved=len(unresolved))
+                    q.task_done()
+
+        workers = [asyncio.create_task(worker()) for _ in range(worker_count)]
         await q.join()
-        for w in workers:
-            w.cancel()
+        for worker_task in workers:
+            worker_task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
 
-    emit(force=True)
+        emit(phase, completed, scheduled, force=True, unresolved=len(unresolved))
+        return unresolved
+
+    connector = aiohttp.TCPConnector(limit=max(WORKERS, VERIFY_WORKERS), ssl=get_ssl_context())
+    async with aiohttp.ClientSession(connector=connector) as session:
+        unresolved = await run_query_phase(session, queries, "crawl", WORKERS)
+
+        while unresolved and stats['verification_passes'] < MAX_VERIFICATION_PASSES:
+            if stop_event and stop_event.is_set():
+                break
+            stats['verification_passes'] += 1
+            unresolved = await run_query_phase(
+                session,
+                sorted(unresolved),
+                "verify",
+                VERIFY_WORKERS,
+                message="Rechecking incomplete query branches",
+            )
 
     elapsed = time.time() - start_time
+    stats['queries_retried'] = len(retried_queries)
+    stats['failed_queries'] = len(unresolved)
+    stats['saturated_queries'] = len(saturated_queries)
+    stats['search_confidence'] = compute_search_confidence(stats)
 
     # Count tournaments by game mode
     for t in all_tournaments.values():
         mode_id = str(t.get('gameMode', {}).get('id', 'unknown'))
-        search_stats['tournaments_by_mode'][mode_id] += 1
+        stats['tournaments_by_mode'][mode_id] += 1
 
     logger.info(f"Fetch completed in {elapsed:.1f}s")
-    logger.info(f"Queries: {search_stats['queries_completed']}, Drill-downs: {search_stats['drill_downs']}, Rate-limits: {search_stats['rate_limits']}, Errors: {search_stats['api_errors']}")
+    logger.info(
+        "Queries: %s, Retried: %s, Drill-downs: %s, Rate-limits: %s, Errors: %s, Verification passes: %s, Unresolved: %s, Saturated: %s, Confidence: %s",
+        stats['queries_completed'],
+        stats['queries_retried'],
+        stats['drill_downs'],
+        stats['rate_limits'],
+        stats['api_errors'],
+        stats['verification_passes'],
+        stats['failed_queries'],
+        stats['saturated_queries'],
+        stats['search_confidence'],
+    )
     logger.info(f"Found {len(all_tournaments)} unique tournaments")
+    if unresolved:
+        logger.warning("Unresolved queries after verification: %s", ", ".join(sorted(unresolved)[:20]))
+    if saturated_queries:
+        logger.warning("Saturated query leaves (possible incomplete coverage): %s", ", ".join(sorted(saturated_queries)[:20]))
 
     # Log breakdown by game mode
     logger.info("Game Mode breakdown:")
-    for mode_id, count in sorted(search_stats['tournaments_by_mode'].items(), key=lambda x: -x[1]):
+    for mode_id, count in sorted(stats['tournaments_by_mode'].items(), key=lambda x: -x[1]):
         mode_name = GAME_MODES.get(mode_id, f"Unknown ({mode_id})")
         logger.info(f"  - {mode_name}: {count}")
+
+    # Publish the finished stats for _snapshot_search_stats() consumers.
+    global search_stats
+    search_stats = stats
 
     return list(all_tournaments.values())
 
@@ -732,7 +918,7 @@ def login():
             session.permanent = True
             session['authenticated'] = True
             return redirect(url_for('index'))
-        error = 'Falsches Passwort'
+        error = 'Wrong password'
 
     return render_template('login.html', error=error)
 
@@ -764,7 +950,7 @@ def api_tournaments():
     if not has_api_key():
         return jsonify({"error": "API key not configured"}), 400
     cache = get_fresh_search_cache()
-    if cache is None:
+    if cache is None and not has_prior_crawl():
         ok, err = validate_api_access()
         if not ok:
             return jsonify({"error": err}), 400
@@ -836,13 +1022,7 @@ def api_tournaments():
         "tournaments": result,
         "total": len(result),
         "unfilteredTotal": unfiltered_total,
-        "stats": {
-            "queries": cached_stats.get("queries_completed", 0),
-            "drillDowns": cached_stats.get("drill_downs", 0),
-            "rateLimits": cached_stats.get("rate_limits", 0),
-            "apiErrors": cached_stats.get("api_errors", 0),
-            "tournamentsByMode": cached_stats.get("tournaments_by_mode", {})
-        }
+        "stats": build_search_stats_payload(cached_stats)
     })
 
 
@@ -861,7 +1041,7 @@ def api_tournaments_search():
     cache = None
     if not force_refresh:
         cache = get_fresh_search_cache()
-    if cache is None:
+    if cache is None and not has_prior_crawl():
         ok, err = validate_api_access()
         if not ok:
             return jsonify({"error": err}), 400
@@ -880,41 +1060,13 @@ def api_tournaments_search():
     logger.info(f"Fetching details for in-progress tournaments (from {total_count} total)...")
     tournaments = fetch_tournament_details_for_in_progress(tournaments)
 
-    # Prepare response with raw time fields
-    result = []
-    for t in tournaments:
-        result.append({
-            "tag": t.get('tag'),
-            "name": t.get('name'),
-            "type": t.get('type'),
-            "status": t.get('status'),
-            "players": t.get('capacity', 0),
-            "maxPlayers": t.get('maxCapacity', 0),
-            "levelCap": t.get('levelCap'),
-            "gameModeId": str(t.get('gameMode', {}).get('id', '')),
-            "gameModeName": get_mode_name(t.get('gameMode', {}).get('id')),
-            # Raw time fields for client-side calculation
-            "createdTime": t.get('createdTime'),
-            "preparationDuration": t.get('preparationDuration', 0),
-            "duration": t.get('duration', 0),
-            "startedTime": t.get('startedTime'),
-            "endedTime": t.get('endedTime')
-        })
+    logger.info(f"=== FETCH COMPLETE: {len(tournaments)} tournaments ===")
 
-    logger.info(f"=== FETCH COMPLETE: {len(result)} tournaments ===")
-
-    return jsonify({
-        "tournaments": result,
-        "total": len(result),
-        "fetchedAt": cache.get("fetchedAt") or datetime.now(timezone.utc).isoformat(),
-        "stats": {
-            "queries": cached_stats.get("queries_completed", 0),
-            "drillDowns": cached_stats.get("drill_downs", 0),
-            "rateLimits": cached_stats.get("rate_limits", 0),
-            "apiErrors": cached_stats.get("api_errors", 0),
-            "tournamentsByMode": cached_stats.get("tournaments_by_mode", {})
-        }
-    })
+    return jsonify(build_tournaments_search_payload(
+        tournaments=tournaments,
+        fetched_at_iso=cache.get("fetchedAt") or datetime.now(timezone.utc).isoformat(),
+        stats_snapshot=cached_stats,
+    ))
 
 
 def build_tournaments_search_payload(tournaments, fetched_at_iso, stats_snapshot):
@@ -943,13 +1095,7 @@ def build_tournaments_search_payload(tournaments, fetched_at_iso, stats_snapshot
         "tournaments": result,
         "total": len(result),
         "fetchedAt": fetched_at_iso,
-        "stats": {
-            "queries": stats_snapshot.get("queries_completed", 0),
-            "drillDowns": stats_snapshot.get("drill_downs", 0),
-            "rateLimits": stats_snapshot.get("rate_limits", 0),
-            "apiErrors": stats_snapshot.get("api_errors", 0),
-            "tournamentsByMode": stats_snapshot.get("tournaments_by_mode", {}),
-        },
+        "stats": build_search_stats_payload(stats_snapshot),
     }
 
 
@@ -994,16 +1140,17 @@ def api_tournaments_search_stream():
                 fetched_at_iso = cache.get("fetchedAt") or datetime.now(timezone.utc).isoformat()
                 progress_cb({"phase": "cache", "message": "Using cached crawl"})
             else:
-                ok, err = validate_api_access()
-                if not ok:
-                    push_event("fail", {"error": err})
-                    return
+                if not has_prior_crawl():
+                    ok, err = validate_api_access()
+                    if not ok:
+                        push_event("fail", {"error": err})
+                        return
 
                 tournaments = fetch_all_tournaments(progress_cb=progress_cb, stop_event=stop_event)
                 stats_snapshot = _snapshot_search_stats()
                 fetched_at_iso = datetime.now(timezone.utc).isoformat()
 
-                ttl = int(os.environ.get("SEARCH_CACHE_TTL_SECONDS", 60))
+                ttl = int(os.environ.get("SEARCH_CACHE_TTL_SECONDS", 180))
                 fetched_at_ts = time.time()
                 new_cache = {
                     "tournaments": tournaments,

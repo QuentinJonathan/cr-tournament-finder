@@ -30,6 +30,10 @@ The app runs at `http://localhost:5050`.
 **Hosting:** Google Cloud Run (Free Tier - 1GB RAM, 300s timeout, ~3000 searches/month free)
 
 #### Deployment (from local machine, not GitHub)
+
+**Easiest way:** double-click `Deploy to Cloud Run.command` in the project root. It finds gcloud, runs the full deploy command below, and mirrors all output to `deploy.log`.
+
+Manual alternative:
 ```bash
 # If gcloud is not in PATH, use full path (Homebrew install):
 # /opt/homebrew/share/google-cloud-sdk/bin/gcloud
@@ -44,7 +48,7 @@ gcloud run deploy cr-tournament-finder \
   --concurrency 10 \
   --min-instances 0 \
   --max-instances 1 \
-  --set-env-vars "FLASK_ENV=production,SEARCH_WORKERS=15,DETAIL_WORKERS=10" \
+  --set-env-vars "FLASK_ENV=production,SEARCH_WORKERS=25,DETAIL_WORKERS=50,VERIFY_WORKERS=5,MAX_VERIFICATION_PASSES=2,QUERY_DRILLDOWN_THRESHOLD=20" \
   --set-secrets "CR_API_KEY=cr-api-key:latest,CR_FINDER_PASSWORD=cr-finder-password:latest,FLASK_SECRET_KEY=flask-secret-key:latest"
 ```
 
@@ -56,10 +60,11 @@ gcloud run deploy cr-tournament-finder \
 #### Cloud Run Notes
 - Project: `cr-tournament-finder`
 - Region: `europe-west3` (Frankfurt)
-- 1GB RAM allows 15 parallel search workers (faster than Render)
+- Current production tuning favors completeness over raw fan-out: `SEARCH_WORKERS=25`, `DETAIL_WORKERS=50`, `VERIFY_WORKERS=5`
+- The crawler now exposes a confidence signal (`high` / `medium` / `low`) plus unresolved and saturated query counts in the debug panel
 - Cold start ~5-10s when idle
 - **No auto-deploy**: Code is uploaded from local machine via `--source .`, not pulled from GitHub
-- Redeploy manually after code changes by running the deployment command above
+- Redeploy manually after code changes via `Deploy to Cloud Run.command` (or the command above)
 - **PWA cache**: If changing `style.css` or `app.js`, bump `CACHE_NAME` in `static/service-worker.js` (see PWA section)
 
 #### Finding gcloud CLI (Homebrew)
@@ -87,12 +92,16 @@ source "/opt/homebrew/share/google-cloud-sdk/completion.zsh.inc"
 | `CR_FINDER_PASSWORD` | Login password for web UI |
 | `FLASK_SECRET_KEY` | Session encryption key (auto-generated) |
 | `FLASK_ENV` | Set to `production` |
-| `SEARCH_WORKERS` | Parallel search threads (default: 25) |
-| `DETAIL_WORKERS` | Parallel detail fetch threads (default: 25) |
+| `SEARCH_WORKERS` | Parallel search queries (recommended: 25) |
+| `DETAIL_WORKERS` | Parallel detail fetch queries (recommended: 50) |
+| `VERIFY_WORKERS` | Low-concurrency verification pass for failed search branches (recommended: 5) |
+| `MAX_VERIFICATION_PASSES` | How often failed search branches are retried after the main crawl (recommended: 2) |
+| `QUERY_DRILLDOWN_THRESHOLD` | Threshold for query saturation and drill-down detection (default: 20) |
 
 ### Shared Deployment Notes
 - Uses RoyaleAPI Proxy (`proxy.royaleapi.dev`) to bypass IP restrictions
 - Gunicorn with 300s timeout for long searches
+- **Gunicorn runs 1 worker (multi-threaded) by default** — the search/detail caches are in-process, so multiple workers would each crawl separately. Scale via `GUNICORN_THREADS`, not `WEB_CONCURRENCY`.
 - Dockerfile included for containerized deployment
 
 ## Architecture
@@ -102,13 +111,13 @@ Flask server with these key components:
 
 - **Authentication**: Session-basierte Auth mit 30-Tage Cookie. Passwort über `CR_FINDER_PASSWORD` Env-Var.
 
-- **Tournament Fetching**: `fetch_all_tournaments()` searches all 2-letter combinations (aa-zz = 676 queries), single digits (0-9), Cyrillic letters (а-я = 33 queries), plus common words in parallel via ThreadPoolExecutor (25 workers). Drills down to 3+ letter queries when hitting the API's ~20 result limit. Deduplicates by tag.
+- **Tournament Fetching**: `fetch_all_tournaments()` uses async HTTP to search all 2-letter combinations (aa-zz = 676 queries), single latin letters (for one-character names), single digits (0-9), Cyrillic letters (а-я = 33 queries), Arabic-script letters/digits, plus common words. The main crawl runs with bounded concurrency, retries transient failures with backoff, and rechecks failed query branches in a verification phase. Results are deduplicated by tag and annotated with a search confidence level.
 
 - **Caching & Performance Knobs**:
-  - Search results are cached in-memory for `SEARCH_CACHE_TTL_SECONDS` (default: 60s). `/api/tournaments/search?force=1` forces a fresh crawl.
-  - HTTP connection pooling uses per-thread `requests.Session` (env: `HTTP_POOL_MAXSIZE`, default: 50).
+  - Search results are cached in-memory for `SEARCH_CACHE_TTL_SECONDS` (default: 180s). `/api/tournaments/search?force=1` forces a fresh crawl.
   - Detail responses are cached in-memory for `DETAIL_CACHE_TTL_SECONDS` (default: 300s).
-  - Drill-down depth is configurable: `MAX_QUERY_LEN` (default: 4), `MAX_CYRILLIC_QUERY_LEN` (default: 2).
+  - Drill-down depth is configurable: `MAX_QUERY_LEN` (default: 4), `MAX_CYRILLIC_QUERY_LEN` (default: 2), `MAX_ARABIC_QUERY_LEN` (default: 3).
+  - Crawl robustness is configurable: `SEARCH_WORKERS`, `DETAIL_WORKERS`, `VERIFY_WORKERS`, `MAX_VERIFICATION_PASSES`, `QUERY_DRILLDOWN_THRESHOLD`.
 
 - **Detail Fetching**: `fetch_tournament_details_batch()` fetches individual tournament details in parallel to get accurate `startedTime` (since hosts can start early before the max prep time). For performance, details are only fetched for `inProgress` tournaments.
 
@@ -116,15 +125,19 @@ Flask server with these key components:
 
 - **Filtering**: Server-side `filter_tournaments()` for legacy endpoint. Client-side filtering in `app.js` for instant filter updates after initial fetch.
 
+- **Search Confidence**: The crawler reports `confidence`, `retriedQueries`, `failedQueries`, `verificationPasses`, and `saturatedQueries`. `high` means no unresolved failed branches and no saturated leaf queries remained after verification.
+
 ### Frontend (`templates/index.html`, `static/app.js`, `static/style.css`)
 Vanilla HTML/CSS/JS with no build step. Frontend sends heartbeat every 30s to keep server alive.
 
 **Client-Side Filtering:**
-- Initial search fetches ALL tournaments via `/api/tournaments/search`
-- Results cached in `allTournaments` array
-- Filter changes apply instantly without API calls
-- Time calculations done in JavaScript (`parseCrTime`, `calcRemainingMinutes`, `calcElapsedMinutes`)
-- Fetch time indicator shows data age with refresh button
+- Initial search fetches ALL tournaments via `/api/tournaments/search` (SSE stream preferred)
+- Results cached in `state.tournaments`; filter changes apply instantly without API calls
+- Time calculations done in JavaScript (`parseCrTime`, `computeCountdown`)
+- Client derives an `effectiveStatus` per tick (prep → live → ended transitions happen live without refresh); ended tournaments are always hidden
+- Refresh button: normal click reuses the server cache, Shift-click forces a full re-crawl
+- AUTO pill toggles auto-refresh (~every 3 min while tab is visible, persisted in localStorage)
+- Favorited tournaments trigger a browser notification when they go live (Notification API)
 
 **UI Theme (January 2026):**
 - Dark gaming aesthetic with Clash Royale-inspired colors
@@ -182,8 +195,8 @@ The app is installable as a standalone app on mobile and desktop.
 When deploying changes to static assets (`style.css`, `app.js`), you MUST bump the cache version in `static/service-worker.js`:
 
 ```javascript
-// Change this version number (e.g., v2 → v3)
-const CACHE_NAME = 'cr-finder-v2';
+// Change this version number (e.g., v9 -> v10)
+const CACHE_NAME = 'cr-finder-v9';
 ```
 
 Why: The service worker uses cache-first for static assets. Without bumping the version:
@@ -204,8 +217,8 @@ The version bump triggers:
 
 ### Logging & Debug
 - Backend logs to both console and `logs/tournament_finder.log`
-- Logs include: filters used, tournaments found by game mode, API stats (queries, drill-downs, rate-limits, errors)
-- Frontend has collapsible debug panel showing search stats, game mode breakdown, and tag search
+- Logs include: filters used, tournaments found by game mode, API stats (queries, retries, verification passes, unresolved branches, rate-limits, errors, confidence)
+- Frontend has collapsible debug panel showing search stats, confidence, game mode breakdown, and tag search
 
 ## API Endpoints
 
@@ -227,7 +240,7 @@ The version bump triggers:
 ## Clash Royale API Notes
 
 - API key from https://developer.clashroyale.com (IP-locked)
-- Tournament search endpoint (`/tournaments?name=X`) returns max ~20 results per query regardless of limit parameter
+- Tournament search endpoint (`/tournaments?name=X`) behaves like a fuzzy search and still needs crawl coverage heuristics; the app treats ~20+ matches as a saturation signal for drill-down
 - Tournament detail endpoint (`/tournaments/{tag}`) returns `startedTime` and `endedTime` fields not available in search
 - The `preparationDuration` field is the MAX prep time - hosts can start early
 - Tournament statuses: `inPreparation`, `inProgress`, `ended`
