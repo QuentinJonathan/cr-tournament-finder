@@ -115,7 +115,7 @@ Flask server with these key components:
 
 - **Authentication**: Session-basierte Auth mit 30-Tage Cookie. Passwort über `CR_FINDER_PASSWORD` Env-Var.
 
-- **Tournament Fetching**: `fetch_all_tournaments()` uses async HTTP to search all 2-letter combinations (aa-zz = 676 queries), single latin letters (for one-character names), single digits (0-9), Cyrillic letters (а-я = 33 queries), Arabic-script letters/digits, plus common words. The main crawl runs with bounded concurrency, retries transient failures with backoff, and rechecks failed query branches in a verification phase. Results are deduplicated by tag and annotated with a search confidence level.
+- **Tournament Fetching**: `fetch_all_tournaments()` uses async HTTP to search all 2-letter combinations (aa-zz = 676 queries), single latin letters (for one-character names), single digits (0-9), accented latin letters (à-ž, since the API does no accent folding), Cyrillic letters (а-я = 33 queries), Arabic-script letters/digits, plus common words. The main crawl runs with bounded concurrency, retries transient failures with backoff, and rechecks failed query branches in a verification phase. Results are deduplicated by tag and annotated with a search confidence level.
 
 - **Caching & Performance Knobs**:
   - Search results are cached in-memory for `SEARCH_CACHE_TTL_SECONDS` (default: 180s). `/api/tournaments/search?force=1` forces a fresh crawl.

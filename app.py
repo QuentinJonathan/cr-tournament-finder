@@ -537,6 +537,12 @@ async def fetch_all_tournaments_async(progress_cb=None, stop_event=None):
     # Single digits
     queries.extend(list(digits))
 
+    # Accented latin letters: the API does word-prefix matching WITHOUT
+    # accent folding ("cok" does not match "çok"), so names whose every
+    # word starts with an accented character are invisible to a-z queries.
+    accented_letters = 'àáâãäåæçèéêëìíîïñòóôõöøùúûüýßıőşğœčćšžł'
+    queries.extend(list(accented_letters))
+
     # Cyrillic letters (33) for Russian tournament names
     cyrillic_letters = 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя'
     queries.extend(list(cyrillic_letters))
