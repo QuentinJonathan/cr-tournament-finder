@@ -1,7 +1,7 @@
 // CR Tournament Finder - Service Worker
 // Provides offline caching for static assets
 
-const CACHE_NAME = 'cr-finder-v16';
+const CACHE_NAME = 'cr-finder-v17';
 const STATIC_ASSETS = [
     '/',
     '/static/style.css',
@@ -18,7 +18,11 @@ self.addEventListener('install', (event) => {
         caches.open(CACHE_NAME)
             .then((cache) => {
                 console.log('[SW] Caching static assets');
-                return cache.addAll(STATIC_ASSETS);
+                // Bypass the browser HTTP cache so a new SW version never
+                // fills its fresh cache with stale assets
+                return cache.addAll(
+                    STATIC_ASSETS.map((url) => new Request(url, { cache: 'reload' }))
+                );
             })
             .then(() => self.skipWaiting())
     );
