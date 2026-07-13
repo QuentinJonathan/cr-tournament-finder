@@ -131,14 +131,15 @@ Flask server with these key components:
 
 - **Search Confidence**: The crawler reports `confidence`, `retriedQueries`, `failedQueries`, `verificationPasses`, and `saturatedQueries`. `high` means no unresolved failed branches and no saturated leaf queries remained after verification.
 
-### Frontend (`templates/index.html`, `static/app.js`, `static/style.css`)
+### Frontend (`templates/index.html`, `static/timing.js`, `static/app.js`, `static/style.css`)
 Vanilla HTML/CSS/JS with no build step. Frontend sends heartbeat every 30s to keep server alive.
 
 **Client-Side Filtering:**
 - Initial search fetches ALL tournaments via `/api/tournaments/search` (SSE stream preferred)
 - Results cached in `state.tournaments`; filter changes apply instantly without API calls
-- Time calculations done in JavaScript (`parseCrTime`, `computeCountdown`)
-- Client derives an `effectiveStatus` per tick (prep → live → ended transitions happen live without refresh); ended tournaments are always hidden
+- Time calculations live in the testable shared `static/timing.js` model (`deriveTiming`)
+- Client derives one phase-aware timing object per tick (prep → live → ended transitions happen live without refresh); list, filters, sorting, details, and notifications consume that same state
+- PREP timers show `Starts by` because a host may start before the maximum preparation duration; LIVE timers show `Ends in`
 - Refresh button: normal click reuses the server cache, Shift-click forces a full re-crawl
 - AUTO pill toggles auto-refresh (~every 3 min while tab is visible, persisted in localStorage)
 - Favorited tournaments trigger a browser notification when they go live (Notification API)
@@ -196,7 +197,7 @@ The app is installable as a standalone app on mobile and desktop.
 
 **Cache Invalidation (IMPORTANT for deployments):**
 
-When deploying changes to static assets (`style.css`, `app.js`), you MUST bump the cache version in `static/service-worker.js`:
+When deploying changes to static assets (`style.css`, `timing.js`, `app.js`), you MUST bump the cache version in `static/service-worker.js`:
 
 ```javascript
 // Change this version number (e.g., v9 -> v10)

@@ -472,7 +472,7 @@ def get_fresh_search_cache():
     return None
 
 
-def get_cached_search_results(force_refresh=False):
+def get_cached_search_results(force_refresh=False, progress_cb=None):
     """Fetch tournaments via the crawler, with an in-memory TTL cache and in-flight dedupe."""
     global _SEARCH_CACHE, _SEARCH_FETCH_IN_PROGRESS
 
@@ -485,6 +485,8 @@ def get_cached_search_results(force_refresh=False):
 
         # If a fetch is already running, wait for it and reuse its result (even if ttl==0).
         if _SEARCH_FETCH_IN_PROGRESS:
+            if progress_cb:
+                progress_cb({"phase": "wait", "message": "Waiting for active crawl"})
             while _SEARCH_FETCH_IN_PROGRESS:
                 _SEARCH_CACHE_COND.wait(timeout=0.5)
             if _SEARCH_CACHE:
@@ -495,7 +497,7 @@ def get_cached_search_results(force_refresh=False):
     # Do the expensive work outside the lock.
     cache = None
     try:
-        tournaments = fetch_all_tournaments()
+        tournaments = fetch_all_tournaments(progress_cb=progress_cb)
         fetched_at_ts = time.time()
         fetched_at_iso = datetime.now(timezone.utc).isoformat()
         stats_snapshot = _snapshot_search_stats()
@@ -1138,10 +1140,7 @@ def api_tournaments_search_stream():
 
     def worker():
         try:
-            cache = None
-            if not force_refresh:
-                cache = get_fresh_search_cache()
-
+            cache = get_fresh_search_cache() if not force_refresh else None
             if cache is not None:
                 tournaments = cache.get("tournaments", [])
                 stats_snapshot = cache.get("stats", _snapshot_search_stats())
@@ -1154,22 +1153,15 @@ def api_tournaments_search_stream():
                         push_event("fail", {"error": err})
                         return
 
-                tournaments = fetch_all_tournaments(progress_cb=progress_cb, stop_event=stop_event)
-                stats_snapshot = _snapshot_search_stats()
-                fetched_at_iso = datetime.now(timezone.utc).isoformat()
-
-                ttl = int(os.environ.get("SEARCH_CACHE_TTL_SECONDS", 180))
-                fetched_at_ts = time.time()
-                new_cache = {
-                    "tournaments": tournaments,
-                    "fetchedAt": fetched_at_iso,
-                    "fetched_at_ts": fetched_at_ts,
-                    "expires_at_ts": fetched_at_ts + ttl if ttl > 0 else fetched_at_ts,
-                    "stats": stats_snapshot,
-                }
-                with _SEARCH_CACHE_COND:
-                    global _SEARCH_CACHE
-                    _SEARCH_CACHE = new_cache
+                # Reuse the same in-flight coordinator as the plain endpoint,
+                # so simultaneous browser sessions never launch duplicate crawls.
+                cache = get_cached_search_results(
+                    force_refresh=force_refresh,
+                    progress_cb=progress_cb,
+                )
+                tournaments = cache.get("tournaments", [])
+                stats_snapshot = cache.get("stats", _snapshot_search_stats())
+                fetched_at_iso = cache.get("fetchedAt") or datetime.now(timezone.utc).isoformat()
 
             # Details phase (only in-progress tournaments)
             in_progress = [t for t in tournaments if t.get('status') == 'inProgress']

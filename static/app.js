@@ -34,7 +34,7 @@ const state = {
   search: '',
   quick: null,           // 'live' | 'prep' | null
   autoRefresh: localStorage.getItem('cr.autoRefresh') === '1',
-  sort: { by: 'endsIn', dir: 'asc' },
+  sort: { by: 'recommended', dir: 'asc' },
   selectedTag: null,
   favorites: new Set(loadFavorites()),
 
@@ -59,80 +59,24 @@ function persistFavorites() {
 }
 
 // ==========================================================
-// Time helpers (kept from previous implementation)
+// Time helpers
 // ==========================================================
-function parseCrTime(s) {
-  if (!s) return null;
-  try {
-    const y = s.substring(0, 4), m = s.substring(4, 6), d = s.substring(6, 8);
-    const hh = s.substring(9, 11), mm = s.substring(11, 13), ss = s.substring(13, 15);
-    const ms = s.substring(16, 19);
-    return new Date(`${y}-${m}-${d}T${hh}:${mm}:${ss}.${ms}Z`);
-  } catch { return null; }
-}
-
-function computeCountdown(t) {
-  // Returns {countdownType, remainingSec, totalSec}
-  const now = Date.now();
-  const duration = t.duration || 0;
-  const prep = t.preparationDuration || 0;
-
-  if (t.status === 'ended') {
-    return { countdownType: 'ended', remainingSec: 0, totalSec: duration || 1 };
-  }
-
-  if (t.status === 'inPreparation') {
-    const created = parseCrTime(t.createdTime);
-    if (created) {
-      const startsAt = created.getTime() + prep * 1000;
-      const remaining = Math.max(0, Math.floor((startsAt - now) / 1000));
-      return { countdownType: 'starts', remainingSec: remaining, totalSec: prep || 1 };
-    }
-    return { countdownType: 'starts', remainingSec: prep, totalSec: prep || 1 };
-  }
-
-  // inProgress
-  let endsAt = null;
-  const started = parseCrTime(t.startedTime);
-  if (started) {
-    endsAt = started.getTime() + duration * 1000;
-  } else {
-    const created = parseCrTime(t.createdTime);
-    if (created) endsAt = created.getTime() + (prep + duration) * 1000;
-  }
-  if (endsAt === null) return { countdownType: 'ends', remainingSec: duration, totalSec: duration || 1 };
-  const remaining = Math.max(0, Math.floor((endsAt - now) / 1000));
-  return { countdownType: 'ends', remainingSec: remaining, totalSec: duration || 1 };
-}
-
-function effectiveStatusOf(t, cd) {
-  // Derive the live status from the countdown so the UI doesn't go stale
-  // between refreshes (prep -> live -> ended transitions happen client-side).
-  if (t.status === 'ended') return 'ended';
-  if (t.status === 'inPreparation') return cd.remainingSec <= 0 ? 'inProgress' : 'inPreparation';
-  if (t.status === 'inProgress') return cd.remainingSec <= 0 ? 'ended' : 'inProgress';
-  return t.status || 'unknown';
-}
-
 function fmtCd(sec) {
-  if (sec <= 0) return '00:00';
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = sec % 60;
-  const pad = n => String(n).padStart(2, '0');
-  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+  return CrTiming.formatCountdown(sec);
 }
 
 function severity(remaining, total) {
-  if (total <= 0) return 'ok';
+  if (!Number.isFinite(remaining) || total <= 0) return 'ok';
   const r = remaining / total;
   if (r <= 0.15) return 'crit';
   if (r <= 0.4) return 'warn';
   return 'ok';
 }
 
-function sevColor(sev) {
-  return sev === 'crit' ? 'var(--db-crit)' : sev === 'warn' ? 'var(--db-warn)' : 'var(--db-ok)';
+function timingTone(timing) {
+  if (timing.phase === 'prep') return 'phase-prep';
+  if (timing.phase !== 'live') return 'phase-unknown';
+  return `sev-${severity(timing.remainingSec, timing.totalSec)}`;
 }
 
 function fmtAbsTime(dt) {
@@ -154,6 +98,39 @@ function fmtAgo(iso) {
   if (mins < 60) return `${mins}m ago`;
   const hrs = Math.floor(mins / 60);
   return `${hrs}h ago`;
+}
+
+function renderFreshness() {
+  if (!$.resultsMetaDot) return;
+  const confidence = String(state.lastStats?.confidence || 'unknown').toLowerCase();
+  const fetchedMs = state.fetchedAt ? new Date(state.fetchedAt).getTime() : NaN;
+  const ageSec = Number.isFinite(fetchedMs) ? Math.max(0, (Date.now() - fetchedMs) / 1000) : null;
+  const stale = ageSec !== null && ageSec >= 240;
+
+  let visualState = 'idle';
+  let statusText = 'No data loaded';
+  if (state.isSearching) {
+    visualState = 'searching';
+    statusText = 'Refreshing tournament data';
+  } else if (confidence === 'low') {
+    visualState = 'error';
+    statusText = 'Low search coverage';
+  } else if (stale) {
+    visualState = 'stale';
+    statusText = 'Tournament data may be stale';
+  } else if (state.fetchedAt) {
+    visualState = confidence === 'medium' ? 'stale' : 'fresh';
+    statusText = confidence === 'medium' ? 'Partial search coverage' : 'Tournament data is current';
+  }
+
+  $.resultsMetaDot.className = `db-meta-dot ${visualState}`;
+  $.resultsMeta.title = `${statusText}. Auto-refresh is ${state.autoRefresh ? 'on' : 'off'}.`;
+  $.fetchAge.textContent = state.fetchedAt ? fmtAgo(state.fetchedAt) : '—';
+  $.confidenceText.textContent = confidence === 'unknown' ? '—' : confidence.toUpperCase();
+  $.confidenceText.className = `db-confidence ${confidence}`;
+  $.autoRefreshBtn.classList.toggle('active', state.autoRefresh);
+  $.autoRefreshBtn.textContent = state.autoRefresh ? 'AUTO ON' : 'AUTO OFF';
+  $.autoRefreshBtn.setAttribute('aria-pressed', String(state.autoRefresh));
 }
 
 // ==========================================================
@@ -181,10 +158,17 @@ function grabRefs() {
     searchInput: id('search-input'),
     quickLive: id('quick-live'),
     quickPrep: id('quick-prep'),
+    resultsMeta: id('results-meta'),
+    resultsMetaDot: id('results-meta-dot'),
     resultsCountText: id('results-count-text'),
     fetchAge: id('fetch-age'),
+    confidenceText: id('confidence-text'),
     refreshBtn: id('refresh-btn'),
     autoRefreshBtn: id('auto-refresh-btn'),
+
+    activeFilters: id('active-filters'),
+    activeFilterChips: id('active-filter-chips'),
+    resetAllBtn: id('reset-all-btn'),
 
     thead: id('thead'),
     rows: id('rows'),
@@ -248,8 +232,6 @@ function grabRefs() {
 // ==========================================================
 const SAVED_VIEWS = [
   { id: 'all',       label: '📋 All tournaments' },
-  { id: 'live',      label: '⚡ Live now' },
-  { id: 'soon',      label: '◎ Starting soon' },
   { id: 'favorites', label: '★ Favorites' },
   { id: 'high-lvl',  label: '👑 Lvl 15+' },
 ];
@@ -259,8 +241,6 @@ function renderSavedViews() {
     .filter(t => (t.effectiveStatus || t.status) !== 'ended');
   const counts = {
     all: pool.length,
-    live: pool.filter(t => (t.effectiveStatus || t.status) === 'inProgress').length,
-    soon: pool.filter(t => (t.effectiveStatus || t.status) === 'inPreparation').length,
     favorites: pool.filter(t => state.favorites.has(t.tag)).length,
     'high-lvl': pool.filter(t => (t.levelCap || 0) >= 15).length,
   };
@@ -269,6 +249,7 @@ function renderSavedViews() {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'db-view' + (state.savedView === v.id ? ' active' : '');
+    btn.setAttribute('aria-pressed', String(state.savedView === v.id));
     btn.innerHTML = `<span>${escapeHtml(v.label)}</span><span class="db-view-count">${counts[v.id] ?? 0}</span>`;
     btn.addEventListener('click', () => {
       state.savedView = v.id;
@@ -294,6 +275,7 @@ function renderModeChecks() {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'db-mode' + (active ? ' active' : '');
+    btn.setAttribute('aria-pressed', String(active));
     btn.innerHTML = `<span class="db-check">${active ? '✓' : ''}</span><span class="db-mode-label">${escapeHtml(name)}</span>`;
     btn.addEventListener('click', () => {
       if (active) ids.forEach(id => state.filters.modes.delete(id));
@@ -308,8 +290,74 @@ function renderModeChecks() {
 function renderLevelCaps() {
   $.levelCaps.querySelectorAll('.db-lvl').forEach(btn => {
     const n = Number(btn.dataset.value);
-    btn.classList.toggle('active', state.filters.levelCaps.has(n));
+    const active = state.filters.levelCaps.has(n);
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
   });
+}
+
+function activeFilterDefinitions() {
+  const chips = [];
+  if (state.search.trim()) chips.push({ key: 'search', label: `Search: ${state.search.trim()}` });
+  if (state.quick) chips.push({ key: 'phase', label: state.quick.toUpperCase() });
+  if (state.savedView === 'favorites') chips.push({ key: 'view', label: 'Favorites' });
+  if (state.savedView === 'high-lvl') chips.push({ key: 'view', label: 'Lvl 15+' });
+  if (state.filters.modes.size) {
+    const selectedModeNames = new Set([...state.filters.modes].map(id => state.gameModes[id] || id));
+    chips.push({ key: 'modes', label: `${selectedModeNames.size} mode${selectedModeNames.size === 1 ? '' : 's'}` });
+  }
+  if (state.filters.levelCaps.size) {
+    chips.push({ key: 'levels', label: `Lvl ${[...state.filters.levelCaps].sort((a, b) => a - b).join(', ')}` });
+  }
+  if (state.filters.minPlayers > 0) chips.push({ key: 'players', label: `${state.filters.minPlayers}+ players` });
+  if (state.filters.minMinsLeft > 0 || state.filters.maxMinsLeft !== null) {
+    const min = state.filters.minMinsLeft || 0;
+    const max = state.filters.maxMinsLeft;
+    chips.push({ key: 'time', label: max === null ? `${min}+ min` : `${min}–${max} min` });
+  }
+  if (state.filters.access !== 'any') {
+    chips.push({ key: 'access', label: state.filters.access === 'open' ? 'Open only' : 'Password' });
+  }
+  return chips;
+}
+
+function renderActiveFilters() {
+  if (!$.activeFilters) return;
+  const chips = activeFilterDefinitions();
+  $.activeFilters.classList.toggle('hidden', chips.length === 0);
+  $.activeFilterChips.innerHTML = chips.map(chip => `
+    <button type="button" class="db-filter-chip" data-clear-filter="${chip.key}" title="Remove filter">
+      ${escapeHtml(chip.label)} <span aria-hidden="true">×</span>
+    </button>
+  `).join('');
+}
+
+function clearFilter(key) {
+  if (key === 'search') {
+    state.search = '';
+    $.searchInput.value = '';
+  } else if (key === 'phase') state.quick = null;
+  else if (key === 'view') state.savedView = 'all';
+  else if (key === 'modes') state.filters.modes.clear();
+  else if (key === 'levels') state.filters.levelCaps.clear();
+  else if (key === 'players') state.filters.minPlayers = 0;
+  else if (key === 'time') {
+    state.filters.minMinsLeft = 0;
+    state.filters.maxMinsLeft = null;
+  } else if (key === 'access') state.filters.access = 'any';
+  syncFilterControls();
+  renderRows();
+}
+
+function resetAllFilters() {
+  state.filters = { modes: new Set(), levelCaps: new Set(), minPlayers: 0, minMinsLeft: 0, maxMinsLeft: null, access: 'any' };
+  state.savedView = 'all';
+  state.quick = null;
+  state.search = '';
+  state.sort = { by: 'recommended', dir: 'asc' };
+  $.searchInput.value = '';
+  syncFilterControls();
+  renderRows();
 }
 
 // ==========================================================
@@ -320,8 +368,6 @@ function matchesFilters(t) {
   if (t.effectiveStatus === 'ended') return false;
 
   // Saved view
-  if (state.savedView === 'live' && t.effectiveStatus !== 'inProgress') return false;
-  if (state.savedView === 'soon' && t.effectiveStatus !== 'inPreparation') return false;
   if (state.savedView === 'favorites' && !state.favorites.has(t.tag)) return false;
   if (state.savedView === 'high-lvl' && (t.levelCap || 0) < 15) return false;
 
@@ -329,9 +375,9 @@ function matchesFilters(t) {
   if (state.filters.modes.size && !state.filters.modes.has(String(t.gameModeId))) return false;
   if (state.filters.levelCaps.size && !state.filters.levelCaps.has(Number(t.levelCap))) return false;
   if (state.filters.minPlayers > 0 && (t.players || 0) < state.filters.minPlayers) return false;
-  const mins = (t.remainingSec || 0) / 60;
-  if (state.filters.minMinsLeft > 0 && mins < state.filters.minMinsLeft) return false;
-  if (state.filters.maxMinsLeft && mins > state.filters.maxMinsLeft) return false;
+  const mins = Number.isFinite(t.remainingSec) ? t.remainingSec / 60 : null;
+  if (state.filters.minMinsLeft > 0 && (mins === null || mins < state.filters.minMinsLeft)) return false;
+  if (state.filters.maxMinsLeft !== null && (mins === null || mins > state.filters.maxMinsLeft)) return false;
   if (state.filters.access === 'open' && t.type === 'passwordProtected') return false;
   if (state.filters.access === 'password' && t.type !== 'passwordProtected') return false;
 
@@ -350,16 +396,33 @@ function matchesFilters(t) {
 
 function enrich() {
   state.enriched = state.tournaments.map(t => {
-    const cd = computeCountdown(t);
+    const timing = CrTiming.deriveTiming(t);
     return {
       ...t,
-      countdownType: cd.countdownType,
-      remainingSec: cd.remainingSec,
-      totalSec: cd.totalSec,
-      effectiveStatus: effectiveStatusOf(t, cd),
+      timing,
+      countdownType: timing.countdownType,
+      remainingSec: timing.remainingSec,
+      totalSec: timing.totalSec,
+      effectiveStatus: timing.effectiveStatus,
     };
   });
   state.enrichedByTag = new Map(state.enriched.map(t => [t.tag, t]));
+}
+
+function phaseRank(t) {
+  if (t.timing?.phase === 'prep') return 0;
+  if (t.timing?.phase === 'live') return 1;
+  return 2;
+}
+
+function finiteRemaining(t) {
+  return Number.isFinite(t.remainingSec) ? t.remainingSec : Number.POSITIVE_INFINITY;
+}
+
+function compareRemaining(a, b) {
+  const left = finiteRemaining(a);
+  const right = finiteRemaining(b);
+  return left === right ? 0 : left - right;
 }
 
 function currentFiltered() {
@@ -371,9 +434,30 @@ function currentFiltered() {
       case 'mode':    return (a.gameModeName || '').localeCompare(b.gameModeName || '') * dir;
       case 'players': return ((a.players || 0) - (b.players || 0)) * dir;
       case 'level':   return ((a.levelCap || 0) - (b.levelCap || 0)) * dir;
-      case 'status':  return (a.status || '').localeCompare(b.status || '') * dir;
-      case 'endsIn':
-      default:        return (a.remainingSec - b.remainingSec) * dir;
+      case 'timing': {
+        const phaseDiff = phaseRank(a) - phaseRank(b);
+        if (phaseDiff !== 0) return phaseDiff;
+        const aKnown = Number.isFinite(a.remainingSec);
+        const bKnown = Number.isFinite(b.remainingSec);
+        if (aKnown !== bKnown) return aKnown ? -1 : 1;
+        return compareRemaining(a, b) * dir;
+      }
+      case 'recommended':
+      default: {
+        const phaseDiff = phaseRank(a) - phaseRank(b);
+        if (phaseDiff !== 0) return phaseDiff;
+        if (a.timing?.phase === 'live') {
+          const aKnown = Number.isFinite(a.remainingSec);
+          const bKnown = Number.isFinite(b.remainingSec);
+          if (aKnown !== bKnown) return aKnown ? -1 : 1;
+          const remainingDiff = compareRemaining(b, a);
+          if (remainingDiff !== 0) return remainingDiff;
+        } else {
+          const remainingDiff = compareRemaining(a, b);
+          if (remainingDiff !== 0) return remainingDiff;
+        }
+        return (b.players || 0) - (a.players || 0);
+      }
     }
   });
   return items;
@@ -385,9 +469,10 @@ function renderRows() {
 
   // Update counts and saved views (counts depend on tournaments, not filters)
   renderSavedViews();
+  renderActiveFilters();
 
   // Results meta
-  const total = state.tournaments.length;
+  const total = state.enriched.filter(t => t.effectiveStatus !== 'ended').length;
   $.resultsCountText.textContent = items.length === total
     ? `${items.length} results`
     : `${items.length}/${total} results`;
@@ -395,6 +480,9 @@ function renderRows() {
   // Quick pill actives
   $.quickLive.classList.toggle('active', state.quick === 'live');
   $.quickPrep.classList.toggle('active', state.quick === 'prep');
+  $.quickLive.setAttribute('aria-pressed', String(state.quick === 'live'));
+  $.quickPrep.setAttribute('aria-pressed', String(state.quick === 'prep'));
+  renderFreshness();
 
   // Sort indicators
   $.thead.querySelectorAll('.db-th').forEach(th => {
@@ -435,13 +523,12 @@ function renderRows() {
 }
 
 function rowHtml(t) {
-  const sev = severity(t.remainingSec, t.totalSec);
-  const color = sevColor(sev);
   const fav = state.favorites.has(t.tag);
   const pct = Math.max(0, Math.min(100, t.maxPlayers ? (t.players / t.maxPlayers) * 100 : 0));
-  const status = t.effectiveStatus || t.status;
-  const live = status === 'inProgress';
-  const ended = status === 'ended';
+  const timing = t.timing || CrTiming.deriveTiming(t);
+  const live = timing.phase === 'live';
+  const phaseLabel = live ? 'LIVE' : timing.phase === 'prep' ? 'PREP' : 'UNKNOWN';
+  const tone = timingTone(timing);
   const isPwd = t.type === 'passwordProtected';
   const cleanTag = String(t.tag || '').replace('#', '');
   const joinUrl = `https://link.clashroyale.com/en?clashroyale://joinTournament?id=${encodeURIComponent(cleanTag)}`;
@@ -450,9 +537,9 @@ function rowHtml(t) {
     <div class="db-row" data-tag="${escapeAttr(t.tag)}">
       <div class="db-row-name-cell">
         <div class="db-row-name-line">
-          <span class="db-row-star ${fav ? 'favorited' : ''}" data-fav="${escapeAttr(t.tag)}" title="${fav ? 'Unfavorite' : 'Favorite'}">★</span>
+          <button type="button" class="db-row-star ${fav ? 'favorited' : ''}" data-fav="${escapeAttr(t.tag)}" title="${fav ? 'Unfavorite' : 'Favorite'}" aria-label="${fav ? 'Remove from favorites' : 'Add to favorites'}" aria-pressed="${fav}">★</button>
           ${isPwd ? '<span class="db-row-lock" title="Password">🔒</span>' : ''}
-          <span class="db-row-name" title="${escapeAttr(t.name || '')}">${escapeHtml(t.name || '—')}</span>
+          <button type="button" class="db-row-name" data-open-details title="${escapeAttr(t.name || '')}" aria-label="Open details for ${escapeAttr(t.name || 'tournament')}">${escapeHtml(t.name || '—')}</button>
         </div>
         <div class="db-row-sub"><span class="db-sub-mode">${escapeHtml(t.gameModeName || '—')} · </span>#${escapeHtml(cleanTag)}</div>
       </div>
@@ -462,9 +549,12 @@ function rowHtml(t) {
         <div class="db-row-players-bar"><div class="db-row-players-bar-fill" style="width:${pct}%"></div></div>
       </div>
       <div class="db-row-level">${t.levelCap || '—'}</div>
-      <div class="db-row-countdown" data-cd="${escapeAttr(t.tag)}" style="color:${color}">${fmtCd(t.remainingSec)}</div>
-      <div class="db-row-status">
-        <span class="db-badge ${live ? 'live' : 'soon'}">${live ? '<span class="db-badge-pulse"></span>LIVE' : ended ? '✕ ENDED' : '◎ SOON'}</span>
+      <div class="db-row-timing ${tone}" data-timing="${escapeAttr(t.tag)}">
+        <div class="db-row-timing-meta">
+          <span class="db-badge ${live ? 'live' : 'prep'}">${live ? '<span class="db-badge-pulse"></span>' : ''}${phaseLabel}</span>
+          <span class="db-row-timing-label">${escapeHtml(timing.timingLabel)}</span>
+        </div>
+        <div class="db-row-countdown" data-cd="${escapeAttr(t.tag)}">${fmtCd(timing.remainingSec)}</div>
       </div>
       <div class="db-row-action">
         <a class="db-join-btn" href="${joinUrl}" target="_blank" rel="noopener" data-join>JOIN</a>
@@ -476,15 +566,18 @@ function rowHtml(t) {
 function attachRowListeners() {
   $.rows.querySelectorAll('.db-row').forEach(row => {
     const tag = row.dataset.tag;
+    const openRow = () => {
+      state.selectedTag = tag;
+      if (state.detailOverlay) openDetail();
+      highlightSelectedRow();
+      renderDetail();
+    };
     row.addEventListener('click', e => {
       const star = e.target.closest('[data-fav]');
       if (star) { toggleFavorite(star.dataset.fav); e.stopPropagation(); return; }
       const join = e.target.closest('[data-join]');
       if (join) { e.stopPropagation(); return; } // allow default link
-      state.selectedTag = tag;
-      if (state.detailOverlay) openDetail();
-      highlightSelectedRow();
-      renderDetail();
+      openRow();
     });
   });
 }
@@ -501,25 +594,29 @@ function highlightSelectedRow() {
 function tickCountdowns() {
   let statusChanged = false;
   state.tournaments.forEach(t => {
-    const cd = computeCountdown(t);
-    const newStatus = effectiveStatusOf(t, cd);
+    const timing = CrTiming.deriveTiming(t);
+    const newStatus = timing.effectiveStatus;
     // Update the enriched copy so filter/sort reflects live values
     const enrichedItem = state.enrichedByTag ? state.enrichedByTag.get(t.tag) : null;
     if (enrichedItem) {
-      enrichedItem.remainingSec = cd.remainingSec;
-      enrichedItem.countdownType = cd.countdownType;
-      enrichedItem.totalSec = cd.totalSec;
+      enrichedItem.timing = timing;
+      enrichedItem.remainingSec = timing.remainingSec;
+      enrichedItem.countdownType = timing.countdownType;
+      enrichedItem.totalSec = timing.totalSec;
       if (enrichedItem.effectiveStatus !== newStatus) {
         if (newStatus === 'inProgress' && state.favorites.has(t.tag)) notifyFavoriteLive(t);
         enrichedItem.effectiveStatus = newStatus;
         statusChanged = true;
       }
     }
-    // Update row countdown cells directly
-    const el = $.rows.querySelector(`[data-cd="${cssEscape(t.tag)}"]`);
-    if (el) {
-      el.textContent = fmtCd(cd.remainingSec);
-      el.style.color = sevColor(severity(cd.remainingSec, cd.totalSec));
+    // Update the complete timing cell so phase and value never diverge.
+    const cell = $.rows.querySelector(`[data-timing="${cssEscape(t.tag)}"]`);
+    if (cell) {
+      cell.className = `db-row-timing ${timingTone(timing)}`;
+      const countdown = cell.querySelector('[data-cd]');
+      const label = cell.querySelector('.db-row-timing-label');
+      if (countdown) countdown.textContent = fmtCd(timing.remainingSec);
+      if (label) label.textContent = timing.timingLabel;
     }
   });
 
@@ -532,8 +629,7 @@ function tickCountdowns() {
     if (t) updateDetailCountdown(t);
   }
 
-  // Update fetch age text
-  if (state.fetchedAt) $.fetchAge.textContent = fmtAgo(state.fetchedAt);
+  renderFreshness();
 }
 
 // Simple CSS.escape polyfill fallback
@@ -588,39 +684,43 @@ function renderDetail() {
   $.detailAccessSub.textContent = isPwd ? 'Password in-game' : 'Anyone can join';
 
   // Timing
-  const created = parseCrTime(t.createdTime);
-  const started = parseCrTime(t.startedTime);
+  const timing = state.enrichedByTag?.get(t.tag)?.timing || CrTiming.deriveTiming(t);
   const duration = t.duration || 0;
   const durMin = Math.round(duration / 60);
-  if (t.status === 'inPreparation' && created) {
-    const startsAt = new Date(created.getTime() + (t.preparationDuration || 0) * 1000);
-    $.detailTimingLine.textContent = `Starts ${fmtAbsTime(startsAt)}`;
-    $.detailTimingSub.textContent = `Duration: ${durMin}m once started`;
-  } else if (t.status === 'inProgress' && (started || created)) {
-    const ref = started || new Date((created.getTime() + (t.preparationDuration || 0) * 1000));
-    const endsAt = new Date(ref.getTime() + duration * 1000);
-    $.detailTimingLine.textContent = `Ends ${fmtAbsTime(endsAt)}`;
-    $.detailTimingSub.textContent = `Started ${fmtAbsTime(ref)} · ${durMin}m total`;
+  if (timing.phase === 'prep' && timing.startsAtMs !== null) {
+    $.detailTimingLine.textContent = `Starts by ${fmtAbsTime(new Date(timing.startsAtMs))}`;
+    $.detailTimingSub.textContent = `May start earlier · ${durMin}m once live`;
+  } else if (timing.phase === 'live' && timing.endsAtMs !== null) {
+    $.detailTimingLine.textContent = `Ends ${fmtAbsTime(new Date(timing.endsAtMs))}`;
+    const startPrefix = timing.isEstimated ? 'Estimated start' : 'Started';
+    $.detailTimingSub.textContent = `${startPrefix} ${fmtAbsTime(new Date(timing.startsAtMs))} · ${durMin}m total`;
+  } else if (timing.phase === 'ended') {
+    $.detailTimingLine.textContent = timing.endsAtMs === null ? 'Tournament ended' : `Ended ${fmtAbsTime(new Date(timing.endsAtMs))}`;
+    $.detailTimingSub.textContent = `${durMin}m total duration`;
   } else {
     $.detailTimingLine.textContent = `Duration: ${durMin}m`;
-    $.detailTimingSub.textContent = '—';
+    $.detailTimingSub.textContent = 'Timing unavailable';
   }
 
   // Join link
   $.detailJoin.href = `https://link.clashroyale.com/en?clashroyale://joinTournament?id=${encodeURIComponent(cleanTag)}`;
 
-  updateDetailCountdown(t);
+  updateDetailCountdown(t, timing);
 }
 
-function updateDetailCountdown(t) {
-  const cd = computeCountdown(t);
-  const sev = severity(cd.remainingSec, cd.totalSec);
-  $.detailCountdownLabel.textContent = cd.countdownType === 'starts' ? 'Starts in' : cd.countdownType === 'ended' ? 'Ended' : 'Time remaining';
-  $.detailCountdownValue.textContent = fmtCd(cd.remainingSec);
-  const pct = cd.totalSec > 0 ? Math.min(100, (cd.remainingSec / cd.totalSec) * 100) : 0;
+function updateDetailCountdown(t, providedTiming = null) {
+  const timing = providedTiming || CrTiming.deriveTiming(t);
+  const sev = severity(timing.remainingSec, timing.totalSec);
+  $.detailCountdownLabel.textContent = timing.timingLabel;
+  $.detailCountdownValue.textContent = fmtCd(timing.remainingSec);
+  const pct = Number.isFinite(timing.remainingSec) && timing.totalSec > 0
+    ? Math.max(0, Math.min(100, (timing.remainingSec / timing.totalSec) * 100))
+    : 0;
   $.detailCountdownBar.style.width = `${pct}%`;
-  $.detailCountdownCard.classList.remove('sev-warn', 'sev-crit');
-  if (sev === 'warn') $.detailCountdownCard.classList.add('sev-warn');
+  $.detailCountdownCard.classList.remove('phase-prep', 'phase-unknown', 'sev-warn', 'sev-crit');
+  if (timing.phase === 'prep') $.detailCountdownCard.classList.add('phase-prep');
+  else if (timing.phase !== 'live') $.detailCountdownCard.classList.add('phase-unknown');
+  else if (sev === 'warn') $.detailCountdownCard.classList.add('sev-warn');
   else if (sev === 'crit') $.detailCountdownCard.classList.add('sev-crit');
 }
 
@@ -646,8 +746,10 @@ function showToast(msg) {
 function toggleFavorite(tag) {
   if (state.favorites.has(tag)) {
     state.favorites.delete(tag);
+    showToast('Removed from favorites');
   } else {
     state.favorites.add(tag);
+    showToast('Favorited · live alert while the app is open');
     // Ask once for permission so we can notify when a favorite goes live.
     if ('Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission().catch(() => {});
@@ -696,6 +798,7 @@ function applyResponsive() {
       $.detail.classList.add('hidden');
     }
   }
+  renderFreshness();
 }
 
 function openSidebar() {
@@ -845,16 +948,19 @@ function showProgress(text) {
   $.progressText.textContent = text || 'Searching…';
   $.progressFill.style.width = '0%';
   $.progressMetrics.textContent = '';
+  renderFreshness();
 }
 function hideProgress() {
   $.progress.classList.add('hidden');
   $.progress.classList.remove('indeterminate');
+  renderFreshness();
 }
 function updateProgress(p) {
   if (!p) return;
   const phase = p.phase || 'working';
   let label = 'Working…';
   if (phase === 'cache') label = 'Cached crawl';
+  else if (phase === 'wait') label = 'Waiting for active crawl';
   else if (phase === 'crawl') label = 'Crawling tournaments';
   else if (phase === 'verify') label = 'Verifying coverage';
   else if (phase === 'details') label = 'Fetching start times';
@@ -886,12 +992,18 @@ function applySearchResponse(data) {
     showToast('Error: ' + data.error);
     return false;
   }
+  const previousStatuses = new Map(state.enriched.map(t => [t.tag, t.effectiveStatus]));
   state.tournaments = data.tournaments || [];
   state.fetchedAt = data.fetchedAt || new Date().toISOString();
   state.lastStats = data.stats || null;
   renderRows();
+  state.enriched.forEach(t => {
+    if (previousStatuses.get(t.tag) === 'inPreparation' && t.effectiveStatus === 'inProgress' && state.favorites.has(t.tag)) {
+      notifyFavoriteLive(t);
+    }
+  });
   if (state.lastStats) updateDebugStats(state.lastStats);
-  $.fetchAge.textContent = fmtAgo(state.fetchedAt);
+  renderFreshness();
   showToast(`Loaded ${state.tournaments.length} tournaments`);
   return true;
 }
@@ -932,7 +1044,7 @@ async function searchTournaments({ force = false } = {}) {
         finally { es.close(); state.activeStream = null; state.isSearching = false; hideProgress(); $.refreshBtn.disabled = false; }
       });
       es.onerror = () => {
-        if (!gotAny) showToast('Connection failed');
+        showToast(gotAny ? 'Search connection interrupted' : 'Connection failed');
         es.close(); state.activeStream = null; state.isSearching = false; hideProgress(); $.refreshBtn.disabled = false;
       };
       return;
@@ -1099,7 +1211,7 @@ function wire() {
     rerenderDebounced();
   });
   $.maxRemaining.addEventListener('input', () => {
-    state.filters.maxMinsLeft = Number($.maxRemaining.value) || null;
+    state.filters.maxMinsLeft = optionalFiniteNumber($.maxRemaining.value);
     rerenderDebounced();
   });
 
@@ -1112,17 +1224,11 @@ function wire() {
   });
 
   // Clear / save defaults
-  $.clearFiltersBtn.addEventListener('click', () => {
-    state.filters = { modes: new Set(), levelCaps: new Set(), minPlayers: 0, minMinsLeft: 0, maxMinsLeft: null, access: 'any' };
-    state.savedView = 'all';
-    state.quick = null;
-    $.minPlayers.value = 0;
-    $.minRemaining.value = '';
-    $.maxRemaining.value = '';
-    $.accessRadio.querySelector('input[value="any"]').checked = true;
-    renderModeChecks();
-    renderLevelCaps();
-    renderRows();
+  $.clearFiltersBtn.addEventListener('click', resetAllFilters);
+  $.resetAllBtn.addEventListener('click', resetAllFilters);
+  $.activeFilterChips.addEventListener('click', e => {
+    const chip = e.target.closest('[data-clear-filter]');
+    if (chip) clearFilter(chip.dataset.clearFilter);
   });
   $.saveDefaultsBtn.addEventListener('click', saveDefaults);
 
@@ -1133,11 +1239,10 @@ function wire() {
   // Normal click reuses the server cache (fast); Shift-click forces a full re-crawl.
   $.refreshBtn.addEventListener('click', e => searchTournaments({ force: e.shiftKey }));
   if ($.autoRefreshBtn) {
-    $.autoRefreshBtn.classList.toggle('active', state.autoRefresh);
     $.autoRefreshBtn.addEventListener('click', () => {
       state.autoRefresh = !state.autoRefresh;
       try { localStorage.setItem('cr.autoRefresh', state.autoRefresh ? '1' : '0'); } catch {}
-      $.autoRefreshBtn.classList.toggle('active', state.autoRefresh);
+      renderFreshness();
       showToast(state.autoRefresh ? 'Auto-refresh on (every 3 min)' : 'Auto-refresh off');
     });
   }
@@ -1223,6 +1328,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   grabRefs();
   wire();
   applyResponsive();
+  renderFreshness();
   renderSavedViews();
   renderLevelCaps();
 

@@ -36,7 +36,7 @@
             </div>
 
             <div class="db-sidebar-scroll">
-                <div class="db-label">Saved views</div>
+                <div class="db-label">Quick views</div>
                 <div class="db-views" id="saved-views"></div>
 
                 <div class="db-label">Mode</div>
@@ -55,7 +55,8 @@
                 <div class="db-label">Players (min)</div>
                 <input type="number" id="min-players" class="db-input" min="0" value="0">
 
-                <div class="db-label">Time left (min)</div>
+                <div class="db-label">Next event in (min)</div>
+                <div class="db-field-hint">PREP → start · LIVE → end</div>
                 <div class="db-range">
                     <input type="number" id="min-remaining" class="db-input" min="0" placeholder="min">
                     <input type="number" id="max-remaining" class="db-input" min="0" placeholder="max">
@@ -94,32 +95,39 @@
                     <input type="text" id="search-input" placeholder="Search name, tag, or mode…" autocomplete="off">
                     <span class="db-kbd">⌘K</span>
                 </div>
-                <div class="db-quick-group" aria-label="Quick filters">
-                    <button class="db-pill" id="quick-live" data-quick="live">LIVE</button>
-                    <button class="db-pill" id="quick-prep" data-quick="prep">PREP</button>
+                <div class="db-quick-group" aria-label="Tournament controls">
+                    <button class="db-pill" id="quick-live" data-quick="live" aria-pressed="false">LIVE</button>
+                    <button class="db-pill" id="quick-prep" data-quick="prep" aria-pressed="false">PREP</button>
+                    <button class="db-pill" id="auto-refresh-btn" title="Auto-refresh every ~3 minutes while the tab is visible" aria-pressed="false">AUTO OFF</button>
                 </div>
                 <span class="db-toolbar-sep"></span>
                 <div class="db-meta" id="results-meta">
-                    <span class="db-meta-dot"></span>
+                    <span class="db-meta-dot idle" id="results-meta-dot" aria-hidden="true"></span>
                     <span id="results-count-text">0 results</span>
                     <span class="db-meta-sep">·</span>
                     <span id="fetch-age">—</span>
+                    <span class="db-meta-sep">·</span>
+                    <span id="confidence-text">—</span>
                 </div>
-                <button class="db-pill" id="auto-refresh-btn" title="Auto-refresh every ~3 minutes while the tab is visible">AUTO</button>
                 <button class="db-refresh" id="refresh-btn" title="Refresh (Shift-click: force full re-crawl)" aria-label="Refresh tournaments">
                     <span class="db-refresh-icon" aria-hidden="true">↻</span>
                     <span class="db-refresh-label">Refresh</span>
                 </button>
             </div>
 
+            <div class="db-active-filters hidden" id="active-filters" aria-live="polite">
+                <span class="db-active-label">Active</span>
+                <div class="db-filter-chips" id="active-filter-chips"></div>
+                <button type="button" class="db-reset-all" id="reset-all-btn">Reset all</button>
+            </div>
+
             <!-- Table head -->
             <div class="db-thead" id="thead">
-                <div class="db-th" data-sort="name">Tournament <span class="db-sort-ind"></span></div>
-                <div class="db-th" data-sort="mode">Mode <span class="db-sort-ind"></span></div>
-                <div class="db-th db-th-right" data-sort="players">Players <span class="db-sort-ind"></span></div>
-                <div class="db-th db-th-right" data-sort="level">Lvl <span class="db-sort-ind"></span></div>
-                <div class="db-th db-th-right" data-sort="endsIn">Ends in <span class="db-sort-ind"></span></div>
-                <div class="db-th db-th-right" data-sort="status">Status <span class="db-sort-ind"></span></div>
+                <button type="button" class="db-th" data-sort="name">Tournament <span class="db-sort-ind"></span></button>
+                <button type="button" class="db-th" data-sort="mode">Mode <span class="db-sort-ind"></span></button>
+                <button type="button" class="db-th db-th-right" data-sort="players">Players <span class="db-sort-ind"></span></button>
+                <button type="button" class="db-th db-th-right" data-sort="level">Lvl <span class="db-sort-ind"></span></button>
+                <button type="button" class="db-th db-th-right" data-sort="timing">Timing <span class="db-sort-ind"></span></button>
                 <div class="db-th db-th-right">Action</div>
             </div>
 
@@ -275,6 +283,7 @@
         </div>
     </div>
 
+    <script src="/static/timing.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>

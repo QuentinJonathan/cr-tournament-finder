@@ -1,10 +1,11 @@
 // CR Tournament Finder - Service Worker
 // Provides offline caching for static assets
 
-const CACHE_NAME = 'cr-finder-v17';
+const CACHE_NAME = 'cr-finder-v18';
 const STATIC_ASSETS = [
     '/',
     '/static/style.css',
+    '/static/timing.js',
     '/static/app.js',
     '/static/icons/icon-192x192.png',
     '/static/icons/icon-512x512.png',
