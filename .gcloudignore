@@ -11,3 +11,4 @@ scratch/
 .DS_Store
 .venv/
 .runtime/
+.claude/
