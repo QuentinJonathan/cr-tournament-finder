@@ -21,6 +21,15 @@ from urllib.parse import urlparse
 log = logging.getLogger('TournamentFinder')
 INTERVAL = 10
 MAX_PINS = 10
+# The API caches each distinct URL for ~120 s; the first request after expiry takes
+# a fresh snapshot. A start therefore stays invisible to one URL for up to two
+# minutes. Every spelling of the name search is a separate cache entry: variants
+# started INTERVAL apart, each re-polled once its snapshot expired (every ~130 s
+# after slot rounding), yield one fresh snapshot per slot.
+SEARCH_VARIANTS = 13
+SEARCH_REFRESH_MARGIN = 2
+MAX_SEARCHES_PER_TICK = 3
+CONFIRM_WINDOW = 300
 
 
 def watch_event(event, **fields):
@@ -47,6 +56,34 @@ def retry_after_seconds(value, now):
             return max(0, parsedate_to_datetime(value).timestamp() - now)
         except (ValueError, TypeError, OverflowError):
             return None
+
+
+def max_age_seconds(cache_control):
+    match = re.search(r'max-age=(\d+)', cache_control or '')
+    return int(match.group(1)) if match else None
+
+
+def search_variants(name, count=SEARCH_VARIANTS):
+    """Distinct query strings that all return the same tournaments.
+
+    Multi-word queries OR their words, so the longest word is the most selective
+    query. Case changes and surrounding spaces do not change the results but each
+    spelling is cached separately; padding also works for scripts without case.
+    """
+    words = str(name or '').split()
+    if not words:
+        return []
+    word = max(words, key=len)
+    lower = word.lower()
+    candidates = [word, lower, word.upper(), word.swapcase(), word.capitalize()]
+    candidates += [lower[:i] + ch.upper() + lower[i + 1:] for i, ch in enumerate(lower) if ch.upper() != ch]
+    for pad in range(1, count + 1):
+        candidates += [word + ' ' * pad, ' ' * pad + word]
+    return list(dict.fromkeys(candidates))[:count]
+
+
+def cr_time(timestamp):
+    return time.strftime('%Y%m%dT%H%M%S.000Z', time.gmtime(timestamp))
 
 
 def empty_state():
@@ -140,9 +177,12 @@ def validate_subscription(value):
 
 
 class WatchService:
-    def __init__(self, store, fetch_detail, serialize, send_push=None, schedule=None, clock=time.time):
+    def __init__(self, store, fetch_detail, serialize, send_push=None, schedule=None, clock=time.time,
+                 search=None):
         self.store, self.fetch_detail, self.serialize = store, fetch_detail, serialize
         self.send_push, self.schedule, self.clock = send_push, schedule, clock
+        # search(tag, query) -> {'item': tournament or None, 'maxAge': seconds} or None
+        self.search = search
         self.tick_lock = threading.Lock()
         self.local_lock = threading.Lock()
         self.local_thread = None
@@ -163,10 +203,12 @@ class WatchService:
         if detail.get('status') != 'inPreparation':
             raise ValueError('This tournament is no longer preparing. Refresh its details.')
         now = self.clock()
+        first_slot = (int(now // INTERVAL) + 1) * INTERVAL
         pin = {'id': uuid.uuid4().hex, 'tag': tag, 'state': 'watching',
                'tournament': self.serialize(detail), 'createdAt': now,
                'expiresAt': now + 86400, 'checkedAt': now, 'failures': 0,
-               'nextCheckAt': (int(now // INTERVAL) + 1) * INTERVAL, 'delivered': []}
+               'nextCheckAt': first_slot, 'delivered': [],
+               'probes': self._initial_probes(detail.get('name'), first_slot)}
         def add(state):
             if tag in state['pins']:
                 return state['pins'][tag]
@@ -195,9 +237,21 @@ class WatchService:
         key = hashlib.sha256(str(endpoint).encode()).hexdigest()
         self.store.update(lambda state: state['subscriptions'].pop(key, None))
 
+    def _initial_probes(self, name, first_slot):
+        # One new cache cycle per slot, so their refreshes stay INTERVAL apart.
+        if not self.search:
+            return []
+        return [{'query': query, 'dueAt': first_slot + i * INTERVAL}
+                for i, query in enumerate(search_variants(name))]
+
+    def _confirming(self, pin, now):
+        # A search-detected start keeps polling details for the real startedTime.
+        return (pin['state'] == 'live' and pin.get('confirmedBy') == 'search' and
+                now < pin.get('detectedAt', 0) + CONFIRM_WINDOW)
+
     def needs_work(self, state):
         now = self.clock()
-        return any(p['state'] == 'watching' or
+        return any(p['state'] == 'watching' or self._confirming(p, now) or
                    (p['state'] == 'live' and now < p.get('detectedAt', 0) + 300 and
                     any(k not in p['delivered'] for k in state['subscriptions']))
                    for p in state['pins'].values())
@@ -237,52 +291,114 @@ class WatchService:
                 # silently kill the chain. Deterministic slots merge duplicate ticks.
                 slot = int(self.clock() // INTERVAL) + 1
                 self.schedule(max(1, slot * INTERVAL - self.clock()), 'slot-' + str(slot))
-            due = {tag: pin for tag, pin in state['pins'].items()
-                   if pin['state'] == 'watching' and self.clock() >= pin.get('nextCheckAt', 0)}
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {tag: executor.submit(self.fetch_detail, tag) for tag, pin in due.items()
-                           if self.clock() < pin['expiresAt']}
-                details = {}
-                for tag, future in futures.items():
-                    try:
-                        details[tag] = future.result()
-                    except WatchRetryAfter as exc:
-                        details[tag] = exc
-                    except Exception:
-                        details[tag] = None
-            for tag, pin in due.items():
-                if pin['state'] != 'watching' or self.clock() < pin.get('nextCheckAt', 0):
+            now = self.clock()
+            work = {}
+            for tag, pin in state['pins'].items():
+                if pin['state'] != 'watching' and not self._confirming(pin, now):
                     continue
+                detail_due = now >= pin.get('nextCheckAt', 0)
+                queries = []
+                if pin['state'] == 'watching' and self.search:
+                    due_probes = sorted((p for p in pin.get('probes', []) if now >= p['dueAt']),
+                                        key=lambda p: p['dueAt'])
+                    queries = [p['query'] for p in due_probes[:MAX_SEARCHES_PER_TICK]]
+                if detail_due or queries:
+                    work[tag] = (pin, detail_due, queries)
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = {}
+                for tag, (pin, detail_due, queries) in work.items():
+                    if now >= pin['expiresAt']:
+                        continue
+                    if detail_due:
+                        futures[tag, None] = executor.submit(self.fetch_detail, tag)
+                    for query in queries:
+                        futures[tag, query] = executor.submit(self.search, tag, query)
+                results = {}
+                for key, future in futures.items():
+                    try:
+                        results[key] = future.result()
+                    except WatchRetryAfter as exc:
+                        results[key] = exc
+                    except Exception:
+                        results[key] = None
+            for tag, (pin, detail_due, queries) in work.items():
                 now = self.clock()
-                detail = details.get(tag)
+                searches = {query: results.get((tag, query)) for query in queries}
+                detail = results.get((tag, None))
                 def apply(current):
                     p = current['pins'].get(tag)
-                    if not p or p['id'] != pin['id'] or p['state'] != 'watching':
+                    if not p or p['id'] != pin['id'] or not (p['state'] == 'watching' or self._confirming(p, now)):
                         return
-                    if now >= p['expiresAt']:
+                    if p['state'] == 'watching' and now >= p['expiresAt']:
                         p['state'] = 'expired'
                         return copy.deepcopy(p)
-                    retry = detail.seconds if isinstance(detail, WatchRetryAfter) else None
-                    if retry is not None or not detail or detail.get('status') not in ('inPreparation', 'inProgress', 'ended'):
-                        p['failures'] += 1
-                        p['nextCheckAt'] = (now + max(INTERVAL, retry) if retry is not None
-                                            else (int(now // INTERVAL) + 1) * INTERVAL)
-                        return copy.deepcopy(p)
-                    p.update(tournament=self.serialize(detail), checkedAt=now, failures=0,
-                             nextCheckAt=(int(now // INTERVAL) + 1) * INTERVAL)
-                    if detail['status'] == 'inProgress':
-                        p.update(state='live', detectedAt=now)
-                    elif detail['status'] == 'ended':
-                        p['state'] = 'ended'
+                    if p['state'] == 'watching' and 'probes' not in p:
+                        # Pins created before search probes existed.
+                        p['probes'] = self._initial_probes(p['tournament'].get('name'),
+                                                           (int(now // INTERVAL) + 1) * INTERVAL)
+                    started = self._apply_searches(p, searches, now)
+                    if detail_due:
+                        self._apply_detail(p, detail, now)
+                    if p['state'] == 'watching' and started:
+                        if started['status'] == 'inProgress':
+                            # Search results carry no startedTime; the start happened at
+                            # most one cache refresh before now. Details replace this.
+                            p.update(state='live', detectedAt=now, confirmedBy='search',
+                                     tournament=self.serialize({**started, 'startedTime': cr_time(now)}),
+                                     nextCheckAt=(int(now // INTERVAL) + 1) * INTERVAL)
+                        else:
+                            p['state'] = 'ended'
                     return copy.deepcopy(p)
                 saved = self.store.update(apply)
                 if saved and saved['id'] == pin['id']:
                     watch_event('watch_decision', tag=tag, watchId=pin['id'], at=self.clock(),
                                 state=saved['state'], failures=saved['failures'],
-                                nextCheckAt=saved.get('nextCheckAt'), detectedAt=saved.get('detectedAt'))
+                                nextCheckAt=saved.get('nextCheckAt'), detectedAt=saved.get('detectedAt'),
+                                confirmedBy=saved.get('confirmedBy'), searches=len(queries),
+                                probes=len(saved.get('probes', [])))
             self.deliver()
         finally:
             self.tick_lock.release()
+
+    def _apply_searches(self, p, searches, now):
+        """Reschedule each probe for its next cache refresh; return a started item."""
+        started = None
+        probes = {probe['query']: probe for probe in p.get('probes', [])}
+        for query, result in searches.items():
+            probe = probes.get(query)
+            if probe is None:
+                continue
+            if isinstance(result, WatchRetryAfter):
+                probe['dueAt'] = now + max(INTERVAL, result.seconds)
+            elif not result:
+                probe['dueAt'] = (int(now // INTERVAL) + 1) * INTERVAL
+            elif result.get('item') is None:
+                # The name search cannot see this tournament (e.g. capped results).
+                p['probes'].remove(probe)
+            else:
+                max_age = result.get('maxAge')
+                probe['dueAt'] = now + (120 if max_age is None else max_age) + SEARCH_REFRESH_MARGIN
+                if result['item'].get('status') in ('inProgress', 'ended'):
+                    started = started or result['item']
+        return started
+
+    def _apply_detail(self, p, detail, now):
+        retry = detail.seconds if isinstance(detail, WatchRetryAfter) else None
+        if retry is not None or not detail or detail.get('status') not in ('inPreparation', 'inProgress', 'ended'):
+            p['failures'] += 1
+            p['nextCheckAt'] = (now + max(INTERVAL, retry) if retry is not None
+                                else (int(now // INTERVAL) + 1) * INTERVAL)
+            return
+        p.update(checkedAt=now, failures=0, nextCheckAt=(int(now // INTERVAL) + 1) * INTERVAL)
+        if p['state'] == 'watching':
+            p['tournament'] = self.serialize(detail)
+            if detail['status'] == 'inProgress':
+                p.update(state='live', detectedAt=now, confirmedBy='detail')
+            elif detail['status'] == 'ended':
+                p['state'] = 'ended'
+        elif detail['status'] in ('inProgress', 'ended'):
+            # Search found the start first; the detail now carries the real startedTime.
+            p.update(tournament=self.serialize(detail), confirmedBy='detail')
 
     def deliver(self):
         if not self.send_push:

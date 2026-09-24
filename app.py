@@ -1321,13 +1321,14 @@ _watch_service = None
 _watch_init_lock = threading.Lock()
 
 
-def fetch_watch_detail(tag):
-    from watch import WatchRetryAfter, fingerprint, retry_after_seconds, watch_event
+def _watch_api_get(path, params, observed, handle):
+    """One logged watcher request; handle(body, headers) turns a 200 body into the result."""
+    from watch import WatchRetryAfter, retry_after_seconds, watch_event
     async def fetch():
-        observed = {'tag': tag, 'requestedAt': time.time()}
+        observed['requestedAt'] = time.time()
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=get_ssl_context())) as client:
             try:
-                async with client.get(f"{API_BASE}/tournaments/{quote(tag, safe='')}",
+                async with client.get(f"{API_BASE}{path}", params=params,
                                       headers=get_api_headers(),
                                       timeout=aiohttp.ClientTimeout(total=8)) as response:
                     observed.update(httpStatus=response.status,
@@ -1339,10 +1340,7 @@ def fetch_watch_detail(tag):
                         observed['retryAfterSeconds'] = retry if retry is not None else 30
                         raise WatchRetryAfter(observed['retryAfterSeconds'])
                     if response.status == 200:
-                        detail = await response.json()
-                        observed.update(status=detail.get('status'), startedTime=detail.get('startedTime'),
-                                        capacity=detail.get('capacity'), fingerprint=fingerprint(detail))
-                        return detail
+                        return handle(await response.json(), response.headers)
             except WatchRetryAfter:
                 raise
             except Exception as exc:
@@ -1352,6 +1350,31 @@ def fetch_watch_detail(tag):
                 watch_event('watch_api_result', **observed)
         return None
     return asyncio.run(fetch())
+
+
+def fetch_watch_detail(tag):
+    from watch import fingerprint
+    observed = {'tag': tag}
+    def handle(detail, headers):
+        observed.update(status=detail.get('status'), startedTime=detail.get('startedTime'),
+                        capacity=detail.get('capacity'), fingerprint=fingerprint(detail))
+        return detail
+    return _watch_api_get(f"/tournaments/{quote(tag, safe='')}", None, observed, handle)
+
+
+def fetch_watch_search(tag, query):
+    """Name search as an independently cached view of one pinned tournament."""
+    from watch import fingerprint, max_age_seconds
+    observed = {'tag': tag, 'source': 'search', 'query': query}
+    def handle(body, headers):
+        items = body.get('items') or []
+        item = next((t for t in items if t.get('tag') == tag), None)
+        observed.update(results=len(items), found=item is not None)
+        if item:
+            observed.update(status=item.get('status'), capacity=item.get('capacity'),
+                            fingerprint=fingerprint(item))
+        return {'item': item, 'maxAge': max_age_seconds(headers.get('Cache-Control'))}
+    return _watch_api_get('/tournaments', {'name': query}, observed, handle)
 
 
 def watch_service():
@@ -1364,7 +1387,8 @@ def watch_service():
             def serialize(t):
                 return build_tournaments_search_payload([t], None, {})['tournaments'][0]
             _watch_service = WatchService(store, fetch_watch_detail, serialize, push_sender,
-                                           cloud_schedule if os.environ.get('WATCH_QUEUE_PATH') else None)
+                                           cloud_schedule if os.environ.get('WATCH_QUEUE_PATH') else None,
+                                           search=fetch_watch_search)
         return _watch_service
 
 

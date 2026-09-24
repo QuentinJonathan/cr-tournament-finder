@@ -6,7 +6,8 @@ import unittest
 from unittest.mock import patch
 
 import app
-from watch import StateStore, WatchService, WatchRetryAfter, normalize_tag, validate_subscription, retry_after_seconds
+from watch import (SEARCH_VARIANTS, StateStore, WatchService, WatchRetryAfter, normalize_tag,
+                   retry_after_seconds, search_variants, validate_subscription)
 
 TAG = '#2PQGYYGY'
 
@@ -186,6 +187,102 @@ class WatchTests(unittest.TestCase):
     def test_production_does_not_claim_background_support_without_queue(self):
         with patch.dict(os.environ, {'FLASK_ENV': 'production'}, clear=True), patch.object(app, 'APP_PASSWORD', ''):
             self.assertEqual(app.app.test_client().post('/api/watches', json={'tag': TAG}).status_code, 503)
+
+
+class SearchProbeTests(unittest.TestCase):
+    """The detail URL is cached for ~120 s; staggered name searches see a start sooner."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = StateStore(self.temp.name + '/state.json')
+        self.now = 1000
+        self.detail = {'tag': TAG, 'name': 'Early start', 'status': 'inPreparation'}
+        self.item = {'tag': TAG, 'name': 'Early start', 'status': 'inPreparation'}
+        self.max_age = 120
+        self.sent, self.searches = [], []
+        self.service = WatchService(self.store, lambda tag: copy.deepcopy(self.detail), copy.deepcopy,
+                                    self.send, lambda *_: None, lambda: self.now, search=self.search)
+        self.store.update(lambda s: s['subscriptions'].update({'phone': {'endpoint': 'mock'}}))
+
+    def search(self, tag, query):
+        self.searches.append((self.now, query))
+        return {'item': copy.deepcopy(self.item), 'maxAge': self.max_age}
+
+    def send(self, subscription, data):
+        self.sent.append(data)
+        return 'sent'
+
+    def run_until(self, end):
+        while self.now < end:
+            self.now += 10
+            self.service.tick()
+
+    def test_variants_are_distinct_spellings_of_the_most_selective_word(self):
+        variants = search_variants('Torneo 10k ARS con entrada')
+        self.assertEqual(len(variants), len(set(variants)), variants)
+        self.assertEqual(len(variants), SEARCH_VARIANTS)
+        self.assertTrue(all(v.strip().lower() == 'entrada' for v in variants))
+        self.assertEqual(len(set(search_variants('بطوله زرافي'))), SEARCH_VARIANTS)
+        self.assertEqual(search_variants(''), [])
+
+    def test_probes_start_one_slot_apart_and_repoll_after_their_cache_refresh(self):
+        self.service.pin(TAG)
+        ramp_end = 1000 + 10 * SEARCH_VARIANTS
+        self.run_until(ramp_end)
+        first = {}
+        for at, query in self.searches:
+            first.setdefault(query, at)
+        self.assertEqual(sorted(first.values()), list(range(1010, ramp_end + 10, 10)))
+        self.searches.clear()
+        self.run_until(ramp_end + 130)
+        # Each spelling is requested again only once its 120 s snapshot expired,
+        # and the refreshes stay one slot apart.
+        self.assertEqual(len(self.searches), SEARCH_VARIANTS)
+        self.assertEqual(len({at for at, _ in self.searches}), SEARCH_VARIANTS)
+        for at, query in self.searches:
+            self.assertGreaterEqual(at, first[query] + 120)
+
+    def test_search_reports_start_while_detail_is_still_cached(self):
+        self.service.pin(TAG)
+        self.run_until(1150)
+        self.item['status'] = 'inProgress'
+        self.run_until(1160)
+        pin = self.store.read()['pins'][TAG]
+        self.assertEqual((pin['state'], pin['confirmedBy'], pin['detectedAt']), ('live', 'search', 1160))
+        self.assertEqual(pin['tournament']['status'], 'inProgress')
+        self.assertEqual(len(self.sent), 1)
+        # Details keep being checked until they confirm the real start time.
+        self.detail.update(status='inProgress', startedTime='20260924T144905.000Z')
+        self.run_until(1170)
+        pin = self.store.read()['pins'][TAG]
+        self.assertEqual(pin['confirmedBy'], 'detail')
+        self.assertEqual(pin['tournament']['startedTime'], '20260924T144905.000Z')
+        self.assertFalse(self.service.needs_work(self.store.read()))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_invisible_tournament_drops_probes_and_keeps_detail_checks(self):
+        self.item = None
+        self.service.pin(TAG)
+        end = 1000 + 10 * SEARCH_VARIANTS
+        self.run_until(end)
+        pin = self.store.read()['pins'][TAG]
+        self.assertEqual(pin['probes'], [])
+        self.assertEqual((pin['state'], pin['checkedAt']), ('watching', end))
+
+    def test_search_failures_retry_next_slot_without_counting_as_detail_failures(self):
+        self.service.search = lambda tag, query: None
+        self.service.pin(TAG)
+        self.run_until(1010)
+        pin = self.store.read()['pins'][TAG]
+        self.assertEqual(pin['failures'], 0)
+        self.assertEqual(pin['probes'][0]['dueAt'], 1020)
+
+    def test_pins_from_before_search_probes_get_probes(self):
+        self.service.pin(TAG)
+        self.store.update(lambda s: s['pins'][TAG].pop('probes'))
+        self.run_until(1010)
+        self.assertEqual(len(self.store.read()['pins'][TAG]['probes']), SEARCH_VARIANTS)
 
 
 if __name__ == '__main__':

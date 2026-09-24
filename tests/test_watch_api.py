@@ -6,7 +6,7 @@ from watch import WatchRetryAfter, fingerprint
 
 
 class WatchApiTests(unittest.TestCase):
-    def fetch(self, status=200, headers=None, detail=None, error=None):
+    def fetch(self, status=200, headers=None, detail=None, error=None, query=None):
         response = MagicMock(status=status, headers=headers or {})
         response.json = AsyncMock(return_value=detail)
         context = MagicMock()
@@ -20,9 +20,25 @@ class WatchApiTests(unittest.TestCase):
         with patch.object(app.aiohttp, 'ClientSession', return_value=session), \
                 patch('watch.watch_event') as event:
             try:
+                if query is not None:
+                    return app.fetch_watch_search('#2PQGYYGY', query)
                 return app.fetch_watch_detail('#2PQGYYGY')
             finally:
                 self.observed = event.call_args.kwargs
+                self.params = client.get.call_args.kwargs.get('params')
+
+    def test_search_finds_pinned_tournament_and_reports_cache_lifetime(self):
+        body = {'items': [{'tag': '#OTHER', 'status': 'inProgress'},
+                          {'tag': '#2PQGYYGY', 'status': 'inProgress', 'capacity': 3}]}
+        result = self.fetch(detail=body, headers={'Cache-Control': 'max-age=87'}, query=' Alliance')
+        self.assertEqual(result, {'item': body['items'][1], 'maxAge': 87})
+        self.assertEqual(self.params, {'name': ' Alliance'})
+        self.assertEqual((self.observed['source'], self.observed['query'], self.observed['found'],
+                          self.observed['status'], self.observed['results']),
+                         ('search', ' Alliance', True, 'inProgress', 2))
+        missing = self.fetch(detail={'items': body['items'][:1]}, query='alliance')
+        self.assertEqual(missing, {'item': None, 'maxAge': None})
+        self.assertFalse(self.observed['found'])
 
     def test_live_response_and_timestamps_are_logged(self):
         detail = {'status': 'inProgress', 'startedTime': '20260906T110131.000Z'}

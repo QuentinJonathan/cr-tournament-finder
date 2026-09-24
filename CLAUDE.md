@@ -271,8 +271,16 @@ The version bump triggers:
 - `watch.py` stores shared pins/subscriptions separately from filters. Production uses the
   existing GCS bucket with generation preconditions; local development uses `.runtime/watches.json`.
 - A pin fetches its tournament directly and only accepts confirmed `inPreparation`. Subsequent
-  checks bypass the 300-second detail cache, use up to four parallel requests with eight-second
+  checks bypass the 300-second detail cache, use up to eight parallel requests with eight-second
   timeouts, and target ten-second slots. Network/API/queue delays can increase that interval.
+- **Search probes** (see "Start latency probe" for why): besides the detail request, each pin polls
+  `SEARCH_VARIANTS=13` spellings of its name's longest word (case changes, then leading/trailing
+  spaces). They are started one slot apart and each is re-polled only after its `max-age` expired,
+  so one fresh snapshot arrives per slot at about the same request rate. A search reporting
+  `inProgress` sets `state=live`, `confirmedBy=search` and pushes immediately with an interim
+  `startedTime` (detection time); details keep being polled up to 300 s until they confirm the real
+  `startedTime` (`confirmedBy=detail`). A spelling whose results do not contain the tag (e.g. capped
+  at 20) is dropped; the detail request always remains as fallback.
 - Pins survive browser closure and server restarts in production. They remain in a separate tray
   regardless of filters. At most ten pins; unpinning, API-confirmed end, or a 24-hour timeout stops
   polling. A confirmed start stops polling and creates one logical notification per device.
@@ -334,8 +342,15 @@ Routes: authenticated `/api/watches` GET/POST/DELETE, `/api/push/config` GET,
 
 Measured with ALLIANCE (`#2CV0Q99G`): `startedTime` 22:13:46, but the watcher's detail request
 returned `inPreparation` until 22:15:10 and `inProgress` from 22:15:20, while `Cache-Control: max-age`
-counted down and reset to 120. Notifications keep using that request until a probe shows an
-alternative is earlier at real starts.
+counted down and reset to 120.
+
+Resolved 24 Sep 2026 (test tournament `#2VRV8YGU`, started early at 16:49:05): API data turns LIVE
+immediately; the whole delay is a ~120 s response cache per distinct URL (`cf-cache-status: DYNAMIC`,
+so not Cloudflare). The first request after expiry takes a fresh snapshot. Extra query params
+(`limit`, `?probe=b`) share the entry, but every spelling of the `name` search (`ClaudeTest`,
+`claudetest`, ` ClaudeTest`) is its own entry. Verified with player counts: a new spelling showed 14
+players while the old one still served 13 for another 75 s. Hence the search probes above. A lowercase
+tag in the detail path is not an alternative (404, `max-age=600`).
 
 `.venv/bin/python scripts/probe_start_latency.py --live '#TAG'` polls one preparing tournament
 every 5 s through distinct URLs: `proxy-detail` (the watcher's request), `proxy-search` (targeted
