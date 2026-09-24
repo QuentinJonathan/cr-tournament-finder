@@ -280,7 +280,9 @@ The version bump triggers:
   HTTP 429 respects Retry-After (30 seconds when absent); HTTP 503 also respects an explicit
   Retry-After, including HTTP dates. The next queue tick after that deadline performs the retry.
 - Watch diagnostics log JSON events: `watch_api_result` (request/response timestamps, HTTP
-  status, raw tournament status/startedTime, cache headers or exception type), `watch_decision`
+  status, raw tournament status/startedTime, player count `capacity`, response `fingerprint`,
+  cache headers incl. `Date`, or exception type; an unchanged fingerprint across checks means
+  the API served the same frozen answer), `watch_decision`
   (state, failures, next check, detection time), and `watch_push_attempt/result/failed`.
   Correlate by tournament tag and watch ID where available. No subscription endpoints or keys
   are logged. A push result of `sent` means provider acceptance, not confirmed iPhone receipt.
@@ -327,6 +329,22 @@ Production refuses to start watches if queue/storage configuration is absent.
 Routes: authenticated `/api/watches` GET/POST/DELETE, `/api/push/config` GET,
 `/api/push/subscription` POST/DELETE, `/api/push/test` POST. Internal OIDC-only
 `/internal/watch/tick` POST. Subscription endpoints/keys never appear in public watch responses.
+
+### Start latency probe
+
+Measured with ALLIANCE (`#2CV0Q99G`): `startedTime` 22:13:46, but the watcher's detail request
+returned `inPreparation` until 22:15:10 and `inProgress` from 22:15:20, while `Cache-Control: max-age`
+counted down and reset to 120. Notifications keep using that request until a probe shows an
+alternative is earlier at real starts.
+
+`.venv/bin/python scripts/probe_start_latency.py --live '#TAG'` polls one preparing tournament
+every 5 s through distinct URLs: `proxy-detail` (the watcher's request), `proxy-search` (targeted
+name search), `-b`/`-c` variants first requested at staggered times, and with `CR_DIRECT_API_KEY`
+(a key whitelisted for this machine's public IP) `direct-detail`/`direct-search`. Start it 3+ minutes
+before the start; it stops once every source reported the start and prints which source was first,
+when the underlying data turned LIVE (answer age from max-age/`Age`), whether new URLs open their
+own cache cycle (then staggered polling can beat the cache) and whether direct API and proxy share
+cache entries. Raw responses: `.runtime/probe-*.jsonl`; re-analyze with `--analyze <file>`.
 
 ### Search strategy and verification
 

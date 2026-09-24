@@ -1322,7 +1322,7 @@ _watch_init_lock = threading.Lock()
 
 
 def fetch_watch_detail(tag):
-    from watch import WatchRetryAfter, retry_after_seconds, watch_event
+    from watch import WatchRetryAfter, fingerprint, retry_after_seconds, watch_event
     async def fetch():
         observed = {'tag': tag, 'requestedAt': time.time()}
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=get_ssl_context())) as client:
@@ -1332,14 +1332,16 @@ def fetch_watch_detail(tag):
                                       timeout=aiohttp.ClientTimeout(total=8)) as response:
                     observed.update(httpStatus=response.status,
                                     cacheControl=response.headers.get('Cache-Control'),
-                                    age=response.headers.get('Age'))
+                                    age=response.headers.get('Age'),
+                                    date=response.headers.get('Date'))
                     retry = retry_after_seconds(response.headers.get('Retry-After'), time.time())
                     if response.status == 429 or (response.status == 503 and retry is not None):
                         observed['retryAfterSeconds'] = retry if retry is not None else 30
                         raise WatchRetryAfter(observed['retryAfterSeconds'])
                     if response.status == 200:
                         detail = await response.json()
-                        observed.update(status=detail.get('status'), startedTime=detail.get('startedTime'))
+                        observed.update(status=detail.get('status'), startedTime=detail.get('startedTime'),
+                                        capacity=detail.get('capacity'), fingerprint=fingerprint(detail))
                         return detail
             except WatchRetryAfter:
                 raise

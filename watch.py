@@ -28,6 +28,11 @@ def watch_event(event, **fields):
     log.info(json.dumps({'event': event, **fields}, separators=(',', ':')))
 
 
+def fingerprint(value):
+    """Short stable hash of an API response; unchanged across checks = frozen answer."""
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:12]
+
+
 class WatchRetryAfter(ValueError):
     def __init__(self, seconds):
         super().__init__('API temporarily unavailable. Please retry later.')

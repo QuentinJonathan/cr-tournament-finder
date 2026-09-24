@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import app
-from watch import WatchRetryAfter
+from watch import WatchRetryAfter, fingerprint
 
 
 class WatchApiTests(unittest.TestCase):
@@ -30,6 +30,14 @@ class WatchApiTests(unittest.TestCase):
         self.assertEqual(self.observed['status'], 'inProgress')
         self.assertEqual(self.observed['startedTime'], detail['startedTime'])
         self.assertGreaterEqual(self.observed['respondedAt'], self.observed['requestedAt'])
+
+    def test_players_fingerprint_and_server_date_are_logged(self):
+        detail = {'status': 'inPreparation', 'capacity': 12, 'membersList': [{'tag': '#P'}]}
+        self.fetch(detail=detail, headers={'Date': 'Mon, 07 Sep 2026 20:15:10 GMT'})
+        self.assertEqual(self.observed['capacity'], 12)
+        self.assertEqual(self.observed['fingerprint'], fingerprint(detail))
+        self.assertEqual(self.observed['date'], 'Mon, 07 Sep 2026 20:15:10 GMT')
+        self.assertNotIn('membersList', self.observed)
 
     def test_rate_limit_and_service_retry_headers_reach_scheduler(self):
         for status, headers, expected in [(429, {}, 30), (429, {'Retry-After': '45'}, 45),
