@@ -66,3 +66,12 @@ test('countdown formatting and CR timestamp validation are stable', () => {
   assert.equal(parseCrTime('not-a-time'), null);
   assert.equal(parseCrTime('20260714T100000.000Z').toISOString(), '2026-07-14T10:00:00.000Z');
 });
+
+test('watched PREP never claims a confirmed start based only on elapsed time', () => {
+  const timing = deriveTiming({status: 'inPreparation', watchingStart: true,
+    createdTime: '20260905T090000.000Z', preparationDuration: 600, duration: 3600},
+    Date.parse('2026-09-05T10:00:00Z'));
+  assert.equal(timing.phase, 'prep');
+  assert.equal(timing.remainingSec, null);
+  assert.equal(timing.timingLabel, 'Checking start');
+});

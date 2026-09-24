@@ -83,6 +83,13 @@ var CrTiming = (() => {
     }
 
     if (t.status === 'inPreparation') {
+      // A monitored pin stays PREP until a fresh API response confirms its start.
+      if (t.watchingStart && scheduledStartAtMs !== null && nowMs >= scheduledStartAtMs) {
+        return {...result({phase: 'prep', countdownType: 'starts', remainingSec: null,
+          totalSec: prepSec, startsAtMs: scheduledStartAtMs, isEstimated: true}),
+          timingLabel: 'Checking start'};
+      }
+
       if (scheduledStartAtMs === null) {
         return result({
           phase: 'prep',

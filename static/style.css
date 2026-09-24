@@ -1468,3 +1468,18 @@ a { color: var(--db-accent); }
   cursor: pointer;
   font-family: inherit;
 }
+
+/* Pinned start watches stay visible independently of the result filters. */
+.db-watch-tray { flex-shrink: 0; padding: 12px 16px; border-bottom: 1px solid var(--db-border); background: var(--db-gold-ghost); max-height: 35vh; overflow-y: auto; }
+.db-watch-heading { font-size: 12px; font-weight: 700; color: var(--db-gold); margin-bottom: 8px; }
+.db-watch-card { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--db-border-soft); }
+.db-watch-copy { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 4px; }
+.db-watch-copy strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.db-watch-copy span { font-size: 11px; color: var(--db-text-2); }
+.db-watch-card.is-live .db-watch-copy span { color: var(--db-ok); }
+.db-row-pin { background: transparent; color: var(--db-gold); border: 1px solid var(--db-border-2); border-radius: 5px; cursor: pointer; padding: 3px 6px; flex-shrink: 0; }
+.db-row-pin:hover, .db-row-pin.active { background: var(--db-gold-ghost); border-color: var(--db-gold-border); }
+.db-push-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+[hidden] { display: none !important; }
+.db-watch-detail { flex: 0 0 auto; width: 100%; margin-top: 10px; min-height: 40px; color: var(--db-gold); }

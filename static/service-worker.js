@@ -1,12 +1,13 @@
 // CR Tournament Finder - Service Worker
 // Provides offline caching for static assets
 
-const CACHE_NAME = 'cr-finder-v18';
+const CACHE_NAME = 'cr-finder-v21';
 const STATIC_ASSETS = [
     '/',
     '/static/style.css',
     '/static/timing.js',
     '/static/app.js',
+    '/static/watch.js',
     '/static/icons/icon-192x192.png',
     '/static/icons/icon-512x512.png',
     '/static/icons/apple-touch-icon.png',
@@ -172,4 +173,24 @@ self.addEventListener('fetch', (event) => {
         );
         return;
     }
+});
+
+
+self.addEventListener('push', event => {
+    let data = {};
+    try { data = event.data ? event.data.json() : {}; } catch {}
+    event.waitUntil(self.registration.showNotification(data.title || 'CR Finder', {
+        body: data.body || 'There is an update for your pinned tournament.',
+        icon: '/static/icons/icon-192x192.png',
+        badge: '/static/icons/icon-192x192.png',
+        tag: data.tag || 'cr-update',
+        data: {url: data.url || '/'},
+    }));
+});
+
+self.addEventListener('notificationclick', event => {
+    event.notification.close();
+    let target = new URL(event.notification.data?.url || '/', self.location.origin);
+    if (target.origin !== self.location.origin) target = new URL('/', self.location.origin);
+    event.waitUntil(clients.openWindow(target.href));
 });

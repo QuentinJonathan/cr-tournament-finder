@@ -530,8 +530,9 @@ async def fetch_all_tournaments_async(progress_cb=None, stop_event=None):
     latin_chars = list(letters + digits)
     drilldown_threshold = int(os.environ.get("QUERY_DRILLDOWN_THRESHOLD", 20))
 
-    # 2-letter combinations (676) remain the main coverage backbone.
-    queries = [a + b for a in letters for b in letters]
+    # Probe single prefixes first; split only saturated branches. Legacy is the benchmark baseline.
+    strategy = os.environ.get('SEARCH_STRATEGY', 'adaptive')
+    queries = [a + b for a in letters for b in letters] if strategy == 'legacy' else []
 
     # Single-letter latin queries catch one-character tournament names.
     queries.extend(list(letters))
@@ -947,6 +948,13 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/service-worker.js')
+def root_service_worker():
+    response = send_from_directory(os.path.join(BASE_DIR, 'static'), 'service-worker.js')
+    response.headers['Cache-Control'] = 'no-cache'
+    return response
+
+
 @app.route('/manifest.json')
 def manifest():
     """Serve PWA manifest"""
@@ -1306,6 +1314,149 @@ def api_save_config():
 
     save_config(config)
     return jsonify({"success": True})
+
+
+# Independent, durable start monitoring (never uses the search/detail caches).
+_watch_service = None
+_watch_init_lock = threading.Lock()
+
+
+def fetch_watch_detail(tag):
+    from watch import WatchRetryAfter, retry_after_seconds, watch_event
+    async def fetch():
+        observed = {'tag': tag, 'requestedAt': time.time()}
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=get_ssl_context())) as client:
+            try:
+                async with client.get(f"{API_BASE}/tournaments/{quote(tag, safe='')}",
+                                      headers=get_api_headers(),
+                                      timeout=aiohttp.ClientTimeout(total=8)) as response:
+                    observed.update(httpStatus=response.status,
+                                    cacheControl=response.headers.get('Cache-Control'),
+                                    age=response.headers.get('Age'))
+                    retry = retry_after_seconds(response.headers.get('Retry-After'), time.time())
+                    if response.status == 429 or (response.status == 503 and retry is not None):
+                        observed['retryAfterSeconds'] = retry if retry is not None else 30
+                        raise WatchRetryAfter(observed['retryAfterSeconds'])
+                    if response.status == 200:
+                        detail = await response.json()
+                        observed.update(status=detail.get('status'), startedTime=detail.get('startedTime'))
+                        return detail
+            except WatchRetryAfter:
+                raise
+            except Exception as exc:
+                observed['errorType'] = type(exc).__name__
+            finally:
+                observed['respondedAt'] = time.time()
+                watch_event('watch_api_result', **observed)
+        return None
+    return asyncio.run(fetch())
+
+
+def watch_service():
+    global _watch_service
+    with _watch_init_lock:
+        if _watch_service is None:
+            from watch import StateStore, WatchService, cloud_schedule, push_sender
+            store = StateStore(os.environ.get('WATCH_STATE_PATH', os.path.join(BASE_DIR, '.runtime', 'watches.json')),
+                               bucket=os.environ.get('WATCH_STATE_BUCKET'))
+            def serialize(t):
+                return build_tournaments_search_payload([t], None, {})['tournaments'][0]
+            _watch_service = WatchService(store, fetch_watch_detail, serialize, push_sender,
+                                           cloud_schedule if os.environ.get('WATCH_QUEUE_PATH') else None)
+        return _watch_service
+
+
+def watch_ready():
+    if os.environ.get('FLASK_ENV') != 'production':
+        return True
+    return all(os.environ.get(k) for k in ('WATCH_QUEUE_PATH', 'WATCH_STATE_BUCKET',
+                                           'WATCH_ORIGIN', 'WATCH_SERVICE_ACCOUNT'))
+
+
+@app.route('/api/watches', methods=['GET', 'POST', 'DELETE'])
+@login_required
+def api_watches():
+    if not watch_ready():
+        return jsonify({'error': 'Background monitoring is not configured yet.'}), 503
+    service = watch_service()
+    try:
+        if request.method != 'GET':
+            if not request.is_json:
+                return jsonify({'error': 'JSON required'}), 415
+            data = request.get_json() or {}
+            if request.method == 'POST':
+                service.pin(data.get('tag'))
+            else:
+                service.remove(data.get('tag'))
+        elif not service.schedule and service.needs_work(service.store.read()):
+            service.kick()  # Resume persisted local pins after a process restart.
+        return jsonify(service.public_state())
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception:
+        logger.error('Watch operation failed', exc_info=False)
+        return jsonify({'error': 'Monitoring could not be updated. Please retry.'}), 503
+
+
+@app.route('/api/push/config')
+@login_required
+def api_push_config():
+    from watch import vapid_keys
+    _, public = vapid_keys()
+    return jsonify({'publicKey': public, 'enabled': bool(public and os.environ.get('VAPID_SUBJECT') and watch_ready()),
+                    'background': bool(os.environ.get('WATCH_QUEUE_PATH'))})
+
+
+@app.route('/api/push/subscription', methods=['POST', 'DELETE'])
+@login_required
+def api_push_subscription():
+    if not request.is_json:
+        return jsonify({'error': 'JSON required'}), 415
+    try:
+        data = request.get_json() or {}
+        if request.method == 'POST':
+            from watch import vapid_keys
+            if not vapid_keys()[1] or not watch_ready():
+                return jsonify({'error': 'Push notifications are not configured yet.'}), 503
+            watch_service().subscribe(data)
+        else:
+            watch_service().unsubscribe(data.get('endpoint'))
+        return jsonify({'success': True})
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid push subscription'}), 400
+
+
+@app.route('/api/push/test', methods=['POST'])
+@login_required
+def api_push_test():
+    if not request.is_json:
+        return jsonify({'error': 'JSON required'}), 415
+    from watch import push_sender
+    import hashlib
+    endpoint = str((request.get_json() or {}).get('endpoint', ''))
+    key = hashlib.sha256(endpoint.encode()).hexdigest()
+    subscription = watch_service().store.read()['subscriptions'].get(key)
+    if not subscription:
+        return jsonify({'error': 'Enable notifications on this device first.'}), 400
+    try:
+        result = push_sender(subscription, {'title': 'CR Finder ist bereit',
+                                           'body': 'Du erhältst hier die Startmeldungen deiner angepinnten Turniere.',
+                                           'tag': 'cr-push-test', 'url': '/'})
+        if result == 'gone':
+            watch_service().unsubscribe(endpoint)
+            return jsonify({'error': 'Subscription expired. Enable notifications again.'}), 410
+        return jsonify({'success': True})
+    except Exception:
+        return jsonify({'error': 'Test notification could not be sent. Please retry.'}), 503
+
+
+@app.route('/internal/watch/tick', methods=['POST'])
+def internal_watch_tick():
+    from watch import verify_task_request
+    if not verify_task_request(request.headers.get('Authorization', '')):
+        return jsonify({'error': 'Unauthorized'}), 401
+    watch_service().tick()
+    return '', 204
 
 
 @app.route('/api/heartbeat', methods=['POST'])

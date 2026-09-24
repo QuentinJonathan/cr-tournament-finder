@@ -9,3 +9,5 @@ venv/
 *.log
 scratch/
 .DS_Store
+.venv/
+.runtime/

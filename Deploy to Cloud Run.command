@@ -18,7 +18,17 @@ else
 fi
 echo "Using gcloud: $GCLOUD"
 
+# Optional watch configuration prepared by scripts/setup_push.py.
+WATCH_SECRET=""
+WATCH_ENV=""
+if [ -f .runtime/watch-deploy-env.json ]; then
+  WATCH_ENV="$(python3 -c 'import json; print(",".join(k+"="+v for k,v in json.load(open(".runtime/watch-deploy-env.json")).items()))')"
+  WATCH_SECRET=",VAPID_PRIVATE_KEY=cr-vapid-private-key:latest"
+fi
+
 "$GCLOUD" run deploy cr-tournament-finder \
+  --project cr-tournament-finder \
+  --account "${CR_GCLOUD_ACCOUNT:-quentinmueller565@gmail.com}" \
   --source . \
   --region europe-west3 \
   --allow-unauthenticated \
@@ -30,8 +40,8 @@ echo "Using gcloud: $GCLOUD"
   --execution-environment gen2 \
   --add-volume name=config,type=cloud-storage,bucket=cr-tournament-finder-config \
   --add-volume-mount volume=config,mount-path=/data \
-  --set-env-vars "FLASK_ENV=production,CONFIG_PATH=/data/config.json,SEARCH_WORKERS=25,DETAIL_WORKERS=50,VERIFY_WORKERS=5,MAX_VERIFICATION_PASSES=2,QUERY_DRILLDOWN_THRESHOLD=20" \
-  --set-secrets "CR_API_KEY=cr-api-key:latest,CR_FINDER_PASSWORD=cr-finder-password:latest,FLASK_SECRET_KEY=flask-secret-key:latest" \
+  --update-env-vars "FLASK_ENV=production,CONFIG_PATH=/data/config.json,SEARCH_WORKERS=25,DETAIL_WORKERS=50,VERIFY_WORKERS=5,MAX_VERIFICATION_PASSES=2,QUERY_DRILLDOWN_THRESHOLD=20${WATCH_ENV:+,$WATCH_ENV}" \
+  --update-secrets "CR_API_KEY=cr-api-key:latest,CR_FINDER_PASSWORD=cr-finder-password:latest,FLASK_SECRET_KEY=flask-secret-key:latest${WATCH_SECRET}" \
   --quiet
 
 RC=$?
@@ -41,3 +51,5 @@ if [ $RC -eq 0 ]; then
 else
   echo "❌ Deployment failed (exit $RC) — see output above."
 fi
+
+exit "$RC"

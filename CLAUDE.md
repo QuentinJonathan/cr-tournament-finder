@@ -115,7 +115,7 @@ Flask server with these key components:
 
 - **Authentication**: Session-basierte Auth mit 30-Tage Cookie. Passwort über `CR_FINDER_PASSWORD` Env-Var.
 
-- **Tournament Fetching**: `fetch_all_tournaments()` uses async HTTP to search all 2-letter combinations (aa-zz = 676 queries), single latin letters (for one-character names), single digits (0-9), accented latin letters (à-ž, since the API does no accent folding), Cyrillic letters (а-я = 33 queries), Arabic-script letters/digits, plus common words. The main crawl runs with bounded concurrency, retries transient failures with backoff, and rechecks failed query branches in a verification phase. Results are deduplicated by tag and annotated with a search confidence level.
+- **Tournament Fetching**: `fetch_all_tournaments()` uses async HTTP with adaptive prefix expansion: single latin letters (for one-character names), single digits (0-9), accented latin letters (à-ž, since the API does no accent folding), Cyrillic letters (а-я = 33 queries), Arabic-script letters/digits, plus common words. The main crawl runs with bounded concurrency, retries transient failures with backoff, and rechecks failed query branches in a verification phase. Results are deduplicated by tag and annotated with a search confidence level.
 
 - **Caching & Performance Knobs**:
   - Search results are cached in-memory for `SEARCH_CACHE_TTL_SECONDS` (default: 180s). `/api/tournaments/search?force=1` forces a fresh crawl.
@@ -138,11 +138,11 @@ Vanilla HTML/CSS/JS with no build step. Frontend sends heartbeat every 30s to ke
 - Initial search fetches ALL tournaments via `/api/tournaments/search` (SSE stream preferred)
 - Results cached in `state.tournaments`; filter changes apply instantly without API calls
 - Time calculations live in the testable shared `static/timing.js` model (`deriveTiming`)
-- Client derives one phase-aware timing object per tick (prep → live → ended transitions happen live without refresh); list, filters, sorting, details, and notifications consume that same state
+- Client derives one phase-aware timing object per tick (prep → live → ended transitions happen live without refresh); list, filters, sorting and details consume that same state; start notifications exclusively use confirmed API status
 - PREP timers show `Starts by` because a host may start before the maximum preparation duration; LIVE timers show `Ends in`
 - Refresh button: normal click reuses the server cache, Shift-click forces a full re-crawl
 - AUTO pill toggles auto-refresh (~every 3 min while tab is visible, persisted in localStorage)
-- Favorited tournaments trigger a browser notification when they go live (Notification API)
+- Favorites remain local bookmarks. Pins use `watch.py` and `static/watch.js` for persistent, server-confirmed start monitoring and Web Push, including iPhone Home Screen PWAs.
 
 **UI Theme (January 2026):**
 - Dark gaming aesthetic with Clash Royale-inspired colors
@@ -175,6 +175,7 @@ Vanilla HTML/CSS/JS with no build step. Frontend sends heartbeat every 30s to ke
 The app is installable as a standalone app on mobile and desktop.
 
 **Files:**
+- `/service-worker.js`: Public root-scoped service worker route (serves `static/service-worker.js`).
 - `manifest.json`: App name, icons, theme colors, display mode
 - `static/service-worker.js`: Static asset caching, offline fallback
 - `static/icons/`: App icons (192x192, 512x512, maskable, apple-touch-icon, favicon)
@@ -263,3 +264,82 @@ The version bump triggers:
 - TAG should be without the `#` prefix (e.g., `2PQGYYGY` not `#2PQGYYGY`)
 - Opens Clash Royale app directly to the tournament join screen
 - Password-protected tournaments: link works but password must be entered in-game
+
+
+## Pinned start watches and iPhone Web Push (September 2026)
+
+- `watch.py` stores shared pins/subscriptions separately from filters. Production uses the
+  existing GCS bucket with generation preconditions; local development uses `.runtime/watches.json`.
+- A pin fetches its tournament directly and only accepts confirmed `inPreparation`. Subsequent
+  checks bypass the 300-second detail cache, use up to four parallel requests with eight-second
+  timeouts, and target ten-second slots. Network/API/queue delays can increase that interval.
+- Pins survive browser closure and server restarts in production. They remain in a separate tray
+  regardless of filters. At most ten pins; unpinning, API-confirmed end, or a 24-hour timeout stops
+  polling. A confirmed start stops polling and creates one logical notification per device.
+- Transient API failures retry at the next 10-second slot; UI retains the last successful check time.
+  HTTP 429 respects Retry-After (30 seconds when absent); HTTP 503 also respects an explicit
+  Retry-After, including HTTP dates. The next queue tick after that deadline performs the retry.
+- Watch diagnostics log JSON events: `watch_api_result` (request/response timestamps, HTTP
+  status, raw tournament status/startedTime, cache headers or exception type), `watch_decision`
+  (state, failures, next check, detection time), and `watch_push_attempt/result/failed`.
+  Correlate by tournament tag and watch ID where available. No subscription endpoints or keys
+  are logged. A push result of `sent` means provider acceptance, not confirmed iPhone receipt.
+  A Cache-Control lifetime alone is not evidence of stale tournament status; diagnose a real
+  transition using consecutive API observations before attributing latency to upstream caching.
+  A PREP pin never changes to LIVE just because its estimated timer ran out.
+- Delivery is retried for up to five minutes. Dead subscriptions (404/410) are removed. A stable
+  notification tag collapses repeat deliveries; a crash between external delivery and persisted
+  acknowledgement can still resend the same logical notification (at-least-once delivery).
+- Production uses Cloud Tasks with one concurrent dispatch. Each authenticated task enqueues its
+  next ten-second slot before API/push work, so request crashes do not lose the continuation.
+  OIDC verifies the configured dispatcher identity and audience. No always-on Cloud Run instance
+  or browser heartbeat is required. After all work ends, the task chain ends.
+- Local mode starts a daemon thread when pins are created/read. The Python process must remain
+  running; it resumes saved pins when the app is opened after a restart.
+- iPhone: iOS 16.4+, add to Home Screen, open that installed PWA, then Settings → Enable
+  notifications. Use Send test to verify delivery and allow the app in any Gaming Focus mode.
+  Actual device permission and delivery cannot be verified by desktop-only tests.
+
+### Production setup and deploy
+
+The hosting project's owning account is `quentinmueller565@gmail.com`; the default gcloud
+account may point elsewhere. Keep explicit `--account` and `--project` flags.
+
+1. Install requirements into the local virtual environment.
+2. Run `.venv/bin/python scripts/setup_push.py --account quentinmueller565@gmail.com`.
+   This enables Cloud Tasks, creates queue `cr-start-watches` and the `cr-watch-dispatch`
+   service account, grants the runtime task-enqueue and dispatcher-impersonation permissions,
+   grants the dispatcher Cloud Run invocation, and creates a stable VAPID key in Secret Manager.
+   The runtime receives access to this one secret. Private key material is never printed.
+3. Run `bash "Deploy to Cloud Run.command"`. It loads non-secret watch settings from
+   `.runtime/watch-deploy-env.json`, mounts `cr-vapid-private-key` as `VAPID_PRIVATE_KEY`, and
+   preserves existing environment/secrets. Repeat setup only if deploying from a new checkout
+   without that local environment file; it reuses the existing VAPID secret.
+4. On the iPhone, enable notifications and send a test. Pin a preparing tournament and check
+   queue dispatch plus the watch's `checkedAt` before relying on alerts.
+
+Environment: `WATCH_QUEUE_PATH`, `WATCH_ORIGIN` (canonical Cloud Run URL used as OIDC audience),
+`WATCH_SERVICE_ACCOUNT`, `WATCH_STATE_BUCKET`, `VAPID_PRIVATE_KEY` (base64 DER PKCS8),
+`VAPID_SUBJECT` (HTTPS contact URL). Local override: `WATCH_STATE_PATH`.
+Cloud Tasks, Cloud Run and GCS usage accrue while watches are active; no free-tier guarantee.
+Production refuses to start watches if queue/storage configuration is absent.
+
+Routes: authenticated `/api/watches` GET/POST/DELETE, `/api/push/config` GET,
+`/api/push/subscription` POST/DELETE, `/api/push/test` POST. Internal OIDC-only
+`/internal/watch/tick` POST. Subscription endpoints/keys never appear in public watch responses.
+
+### Search strategy and verification
+
+`SEARCH_STRATEGY=adaptive` is now the default. A successful prefix response below the known
+20-item cap does not expand; capped branches split using the existing alphabets/depth limits.
+Unicode probes and retry/verification behavior are retained. `SEARCH_STRATEGY=legacy` restores
+unconditional aa–zz probes for comparison or rollback.
+
+`.venv/bin/python scripts/benchmark_search.py --live` performs legacy/adaptive/legacy searches
+and compares tags present in both baseline runs. Last measured: all 174 stable tags preserved;
+892 → 294 queries; 15.46/17.65 seconds baseline vs 5.02 seconds adaptive. This is a live sample,
+not proof of exhaustive coverage for every future API state. Report: `.runtime/search-benchmark.json`.
+
+Checks: `.venv/bin/python -m unittest discover -s tests -v` and
+`node --test tests/test_timing.js tests/test_service_worker.js tests/test_watch_frontend.js`. Push encryption tests use real
+VAPID/aes128gcm encryption with a mocked HTTP transport; no message is sent by these tests.

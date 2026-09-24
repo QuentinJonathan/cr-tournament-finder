@@ -121,6 +121,12 @@
                 <button type="button" class="db-reset-all" id="reset-all-btn">Reset all</button>
             </div>
 
+            <section class="db-watch-tray hidden" id="watch-tray" aria-label="Pinned tournaments">
+                <div class="db-watch-heading">📌 Watching for a start</div>
+                <div id="watch-items"></div>
+                <p id="watch-push-hint" class="db-field-hint"></p>
+            </section>
+
             <!-- Table head -->
             <div class="db-thead" id="thead">
                 <button type="button" class="db-th" data-sort="name">Tournament <span class="db-sort-ind"></span></button>
@@ -203,6 +209,7 @@
                 <div class="db-flex-fill"></div>
 
                 <a id="detail-join" href="#" target="_blank" rel="noopener" class="db-join-big">⚔ JOIN TOURNAMENT</a>
+                <button type="button" class="db-action-btn db-watch-detail hidden" id="detail-watch-btn">📌 Pin &amp; notify on start</button>
                 <div class="db-detail-actions">
                     <button class="db-action-btn" id="detail-fav-btn">☆ Favorite</button>
                     <button class="db-action-btn" id="detail-copy-btn">📋 Copy tag</button>
@@ -224,6 +231,15 @@
                 <button class="db-icon-btn" id="settings-close">✕</button>
             </div>
             <div class="db-settings-body">
+                <div class="db-settings-section">
+                    <div class="db-label">Start notifications</div>
+                    <p class="db-settings-hint" id="push-hint">Checking notification setup…</p>
+                    <div class="db-push-actions">
+                        <button class="db-action-btn db-action-primary" id="push-enable">Enable notifications</button>
+                        <button class="db-action-btn" id="push-test" hidden>Send test</button>
+                        <button class="db-action-btn" id="push-disable" hidden>Disable on this device</button>
+                    </div>
+                </div>
                 <div class="db-settings-section">
                     <div class="db-label">API Key</div>
                     <p class="db-settings-hint">Get your key from <a href="https://developer.clashroyale.com" target="_blank" rel="noopener">developer.clashroyale.com</a>. Keys are IP-locked.</p>
@@ -284,6 +300,7 @@
     </div>
 
     <script src="/static/timing.js"></script>
+    <script src="/static/watch.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>

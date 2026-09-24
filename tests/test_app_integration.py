@@ -108,7 +108,8 @@ class AppIntegrationTests(unittest.TestCase):
         with open(service_worker_path, "r", encoding="utf-8") as handle:
             source = handle.read()
 
-        self.assertIn("cr-finder-v18", source)
+        self.assertRegex(source, r"cr-finder-v\d+")
+        self.assertIn("'/static/watch.js'", source)
         self.assertIn("'/static/timing.js'", source)
 
 

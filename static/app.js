@@ -2,7 +2,7 @@
 
 // ---------- Service worker ----------
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/static/service-worker.js').catch(() => {});
+  navigator.serviceWorker.register('/service-worker.js').catch(() => {});
 }
 
 // ==========================================================
@@ -204,6 +204,7 @@ function grabRefs() {
     detailJoin: id('detail-join'),
     detailFavBtn: id('detail-fav-btn'),
     detailCopyBtn: id('detail-copy-btn'),
+    detailWatchBtn: id('detail-watch-btn'),
 
     toast: id('toast'),
 
@@ -515,7 +516,7 @@ function renderRows() {
   }
 
   // Auto-select first row when nothing selected or selection filtered out
-  if (!state.selectedTag || !items.some(t => t.tag === state.selectedTag)) {
+  if (!state.selectedTag || (!CrWatch.has(state.selectedTag) && !items.some(t => t.tag === state.selectedTag))) {
     state.selectedTag = items[0]?.tag || null;
   }
   renderDetail();
@@ -538,6 +539,7 @@ function rowHtml(t) {
       <div class="db-row-name-cell">
         <div class="db-row-name-line">
           <button type="button" class="db-row-star ${fav ? 'favorited' : ''}" data-fav="${escapeAttr(t.tag)}" title="${fav ? 'Unfavorite' : 'Favorite'}" aria-label="${fav ? 'Remove from favorites' : 'Add to favorites'}" aria-pressed="${fav}">★</button>
+          ${CrWatch.has(t.tag) ? `<button class="db-row-pin active" data-unwatch="${escapeAttr(t.tag)}" title="Stop watching" aria-label="Stop watching start">📌</button>` : t.status === 'inPreparation' ? `<button class="db-row-pin" data-watch="${escapeAttr(t.tag)}" title="Pin and watch start" aria-label="Pin and watch start">📌</button>` : ''}
           ${isPwd ? '<span class="db-row-lock" title="Password">🔒</span>' : ''}
           <button type="button" class="db-row-name" data-open-details title="${escapeAttr(t.name || '')}" aria-label="Open details for ${escapeAttr(t.name || 'tournament')}">${escapeHtml(t.name || '—')}</button>
         </div>
@@ -573,6 +575,7 @@ function attachRowListeners() {
       renderDetail();
     };
     row.addEventListener('click', e => {
+      if (e.target.closest('[data-watch], [data-unwatch]')) return;
       const star = e.target.closest('[data-fav]');
       if (star) { toggleFavorite(star.dataset.fav); e.stopPropagation(); return; }
       const join = e.target.closest('[data-join]');
@@ -604,7 +607,6 @@ function tickCountdowns() {
       enrichedItem.countdownType = timing.countdownType;
       enrichedItem.totalSec = timing.totalSec;
       if (enrichedItem.effectiveStatus !== newStatus) {
-        if (newStatus === 'inProgress' && state.favorites.has(t.tag)) notifyFavoriteLive(t);
         enrichedItem.effectiveStatus = newStatus;
         statusChanged = true;
       }
@@ -642,6 +644,7 @@ function cssEscape(s) {
 // ==========================================================
 function renderDetail() {
   if (!state.selectedTag) {
+    $.detailWatchBtn.classList.add('hidden');
     $.detailName.textContent = 'Select a tournament';
     $.detailTag.textContent = '#—';
     $.detailLock.classList.add('hidden');
@@ -664,6 +667,12 @@ function renderDetail() {
   const t = state.tournaments.find(x => x.tag === state.selectedTag);
   if (!t) return;
   const cleanTag = String(t.tag).replace('#', '');
+  const pinned = CrWatch.has(t.tag);
+  $.detailWatchBtn.classList.toggle('hidden', !pinned && t.status !== 'inPreparation');
+  $.detailWatchBtn.textContent = pinned ? '📌 Stop watching start' : '📌 Pin & notify on start';
+  delete $.detailWatchBtn.dataset.watch;
+  delete $.detailWatchBtn.dataset.unwatch;
+  $.detailWatchBtn.dataset[pinned ? 'unwatch' : 'watch'] = t.tag;
   const fav = state.favorites.has(t.tag);
   const isPwd = t.type === 'passwordProtected';
 
@@ -749,26 +758,10 @@ function toggleFavorite(tag) {
     showToast('Removed from favorites');
   } else {
     state.favorites.add(tag);
-    showToast('Favorited · live alert while the app is open');
-    // Ask once for permission so we can notify when a favorite goes live.
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission().catch(() => {});
-    }
+    showToast('Added to favorites');
   }
   persistFavorites();
   renderRows();
-}
-
-function notifyFavoriteLive(t) {
-  showToast(`★ ${t.name || t.tag} is live!`);
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  try {
-    new Notification('Tournament live', {
-      body: `${t.name || t.tag} just started — join now!`,
-      tag: `cr-live-${t.tag}`,
-      icon: '/static/icons/icon-192x192.png',
-    });
-  } catch {}
 }
 
 // ==========================================================
@@ -992,16 +985,10 @@ function applySearchResponse(data) {
     showToast('Error: ' + data.error);
     return false;
   }
-  const previousStatuses = new Map(state.enriched.map(t => [t.tag, t.effectiveStatus]));
-  state.tournaments = data.tournaments || [];
+  state.tournaments = CrWatch.merge(data.tournaments || []);
   state.fetchedAt = data.fetchedAt || new Date().toISOString();
   state.lastStats = data.stats || null;
   renderRows();
-  state.enriched.forEach(t => {
-    if (previousStatuses.get(t.tag) === 'inPreparation' && t.effectiveStatus === 'inProgress' && state.favorites.has(t.tag)) {
-      notifyFavoriteLive(t);
-    }
-  });
   if (state.lastStats) updateDebugStats(state.lastStats);
   renderFreshness();
   showToast(`Loaded ${state.tournaments.length} tournaments`);
@@ -1338,6 +1325,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadConfig();
   renderRows(); // initial empty/"set API key" state
 
+  CrWatch.init(() => {
+    state.tournaments = CrWatch.merge(state.tournaments);
+    const target = new URLSearchParams(location.search).get('tournament');
+    if (target && state.tournaments.some(t => t.tag === '#' + target)) {
+      state.selectedTag = '#' + target;
+      if (state.detailOverlay) openDetail();
+      history.replaceState(null, '', '/');
+    }
+    renderRows();
+  });
   startHeartbeat();
 
   // Tick every second for countdowns + fetch-age
