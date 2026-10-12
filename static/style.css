@@ -196,6 +196,7 @@ a { color: var(--db-accent); }
   border-color: var(--db-accent);
 }
 .db-mode-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.db-mode-empty { padding: 7px 10px; font-size: 11px; color: var(--db-muted); }
 
 /* Level caps */
 .db-levels { display: flex; gap: 3px; flex-wrap: wrap; }

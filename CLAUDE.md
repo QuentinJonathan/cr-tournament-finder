@@ -218,7 +218,10 @@ The version bump triggers:
 
 ### Data Files
 - `config.json`: Stores API key and saved filter defaults
-- `game_modes.json`: Maps game mode IDs (e.g., 72000009) to human-readable names
+- `game_modes.json`: Maps game mode IDs (e.g., 72000009) to human-readable names (static snapshot)
+- `learned_game_modes.json` (next to `CONFIG_PATH`, locally `.runtime/`): names for mode IDs missing from the snapshot.
+  After each crawl, `resolve_unknown_game_modes()` reads `gameMode.name` from battle logs of live tournament members
+  (e.g. 72000512 `Chaos_1v1_MegaDraft_All` → "Chaos Mega Draft"); unresolvable IDs are retried after 10 minutes.
 - `logs/tournament_finder.log`: Rotating log file (max 5MB, 3 backups) with search stats, found tournaments, and filter results
 
 ### Logging & Debug
@@ -237,7 +240,7 @@ The version bump triggers:
 | `/api/tournaments` | GET | Fetch and filter tournaments (legacy, server-side filtering) |
 | `/api/tournaments/search` | GET | Fetch ALL tournaments with raw time fields (for client-side filtering) |
 | `/api/tournaments/search/stream` | GET | SSE: Stream search progress + final payload (preferred by UI) |
-| `/api/game-modes` | GET | Get game mode ID → name mapping |
+| `/api/game-modes` | GET | Get full game mode ID → name mapping (snapshot + learned) |
 | `/api/config` | GET/POST | Read/save API key and filter defaults |
 | `/api/logs` | GET | Get log file contents (params: `lines`, `search`) |
 | `/api/heartbeat` | POST | Keep server alive |
@@ -360,6 +363,19 @@ before the start; it stops once every source reported the start and prints which
 when the underlying data turned LIVE (answer age from max-age/`Age`), whether new URLs open their
 own cache cycle (then staggered polling can beat the cache) and whether direct API and proxy share
 cache entries. Raw responses: `.runtime/probe-*.jsonl`; re-analyze with `--analyze <file>`.
+
+### Mode filter
+
+The sidebar lists the modes present in the current results (grouped by display name, with
+`matching/total` counts against the other filters) plus any selected ones. Mode filters match by
+display name, so a saved ID such as 72000024 also covers 72000031 ("Sudden Death Battle").
+
+### Hedged search requests
+
+Single search responses occasionally stall for 5-10+ s (normal p99 < 1 s), which used to leave the
+crawl at 95-100 % for up to a minute. Each query now races equivalent spellings (`t`, `T`, ` t`;
+each is its own upstream cache entry): the next one starts whenever nothing answered for
+`SEARCH_HEDGE_SECONDS` (default 1.5). A 429 stops hedging and backs off. The crawl log reports `Hedged:`.
 
 ### Search strategy and verification
 

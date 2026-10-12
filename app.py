@@ -6,6 +6,7 @@ A web app to find and filter CR tournaments
 
 import json
 import os
+import re
 import time
 import threading
 import logging
@@ -98,6 +99,7 @@ def make_search_stats():
         'failed_queries': 0,
         'verification_passes': 0,
         'saturated_queries': 0,
+        'hedged_requests': 0,
         'search_confidence': 'unknown',
         'tournaments_by_mode': defaultdict(int)
     }
@@ -162,6 +164,44 @@ def load_game_modes():
         return {}
 
 GAME_MODES = load_game_modes()
+
+# game_modes.json is a static snapshot, but Supercell adds modes every season (e.g. the
+# August 2026 "Chaos" modes). Unknown IDs get named from a member's battle log, which
+# reports the internal mode name, and are persisted next to the config.
+LEARNED_MODES_PATH = os.environ.get('LEARNED_MODES_PATH') or os.path.join(
+    os.path.dirname(CONFIG_PATH) if os.environ.get('CONFIG_PATH') else os.path.join(BASE_DIR, '.runtime'),
+    'learned_game_modes.json')
+LEARNED_MODE_RETRY_SECONDS = 600
+_LEARNED_MODES_LOCK = threading.Lock()
+_mode_lookup_failed_at = {}
+
+
+def load_learned_game_modes():
+    try:
+        with open(LEARNED_MODES_PATH, 'r') as f:
+            return {str(k): str(v) for k, v in json.load(f).items()}
+    except Exception:
+        return {}
+
+
+LEARNED_GAME_MODES = load_learned_game_modes()
+
+
+def all_game_modes():
+    with _LEARNED_MODES_LOCK:
+        return {**LEARNED_GAME_MODES, **GAME_MODES}
+
+
+_MODE_NAME_NOISE = {'1v1', 'All', 'Event', 'Friendly', 'Tournament', 'Ladder'}
+
+
+def humanize_mode_name(internal_name):
+    """'Chaos_1v1_MegaDraft_All' -> 'Chaos Mega Draft'."""
+    words = []
+    for part in internal_name.split('_'):
+        if part not in _MODE_NAME_NOISE:
+            words.extend(re.findall(r'\d+v\d+|[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+', part))
+    return ' '.join(words) or internal_name
 
 
 def load_config():
@@ -239,80 +279,104 @@ async def validate_api_access_async():
 def validate_api_access():
     return asyncio.run(validate_api_access_async())
 
+def query_spellings(query):
+    """Equivalent spellings of a name search, in hedging order.
+
+    The API matches case-insensitively and ignores a leading space, but its ~120 s
+    response cache keys on the exact spelling, so each spelling is fetched independently.
+    """
+    spellings = [query]
+    upper = query.upper()
+    if upper != query and upper.lower() == query:  # skip non-reversible cases like 'ß' -> 'SS'
+        spellings.append(upper)
+    spellings.append(' ' + query)
+    return spellings
+
+
+async def _search_request_async(session, spelling):
+    async with session.get(
+        f"{API_BASE}/tournaments",
+        headers=get_api_headers(),
+        params={"name": spelling, "limit": 100},
+        timeout=API_TIMEOUT,
+    ) as resp:
+        if resp.status == 200:
+            data = await resp.json()
+            return resp.status, data.get("items", []), resp
+        return resp.status, None, resp
+
+
+async def _hedged_search_async(session, query, stats):
+    """One search attempt that hedges stalls.
+
+    Single upstream responses occasionally stall for 5-10+ s while the rest of the crawl
+    answers in ~0.5 s. Whenever nothing answered for SEARCH_HEDGE_SECONDS, the next
+    equivalent spelling is started; the first success wins. Returns (status, items, response).
+    """
+    hedge_after = float(os.environ.get("SEARCH_HEDGE_SECONDS", 1.5))
+    spellings = query_spellings(query)
+    started = 0
+    pending = set()
+    done = set()
+    failure = (None, None, None)
+    try:
+        while True:
+            if started < len(spellings) and (not pending or not done):
+                if pending:
+                    stats['hedged_requests'] += 1
+                pending.add(asyncio.ensure_future(_search_request_async(session, spellings[started])))
+                started += 1
+            if not pending:
+                return failure
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=hedge_after if started < len(spellings) else None,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                failure = (None, None, None) if task.exception() else task.result()
+                if failure[0] in (200, 429):
+                    return failure
+    finally:
+        for task in pending:
+            task.cancel()
+
+
 async def fetch_tournaments_by_query_async(session, query, stats):
     """Fetch tournaments matching a query string asynchronously with retry on failure"""
     max_attempts = 4
-    last_status = None
+    status = None
     for attempt in range(max_attempts):
-        try:
-            async with session.get(
-                f"{API_BASE}/tournaments",
-                headers=get_api_headers(),
-                params={"name": query, "limit": 100},
-                timeout=API_TIMEOUT,
-            ) as resp:
-                last_status = resp.status
-                if resp.status == 200:
-                    data = await resp.json()
-                    stats['queries_completed'] += 1
-                    return {
-                        "ok": True,
-                        "items": data.get("items", []),
-                        "attempts": attempt + 1,
-                        "status": resp.status,
-                    }
-                elif resp.status == 429:
-                    stats['rate_limits'] += 1
-                    if attempt < max_attempts - 1:
-                        await asyncio.sleep(get_retry_delay_seconds(attempt, resp))
-                        continue
-                    logger.debug(f"API rate limit for query '{query}' after {max_attempts} attempts")
-                    return {
-                        "ok": False,
-                        "items": [],
-                        "attempts": attempt + 1,
-                        "status": resp.status,
-                    }
-                elif 500 <= resp.status < 600 and attempt < max_attempts - 1:
-                    await asyncio.sleep(get_retry_delay_seconds(attempt, resp))
-                    continue
-                else:
-                    stats['api_errors'] += 1
-                    logger.debug(f"API error for query '{query}': HTTP {resp.status}")
-                    return {
-                        "ok": False,
-                        "items": [],
-                        "attempts": attempt + 1,
-                        "status": resp.status,
-                    }
-        except Exception as e:
-            if attempt < max_attempts - 1:
-                await asyncio.sleep(get_retry_delay_seconds(attempt))
-                continue
+        status, items, resp = await _hedged_search_async(session, query, stats)
+        if status == 200:
+            stats['queries_completed'] += 1
+            return {"ok": True, "items": items, "attempts": attempt + 1, "status": status}
+        if status == 429:
+            stats['rate_limits'] += 1
+        elif status is not None and not 500 <= status < 600:
             stats['api_errors'] += 1
-            logger.debug(f"Request error for query '{query}': {e}")
-            return {
-                "ok": False,
-                "items": [],
-                "attempts": attempt + 1,
-                "status": None,
-            }
-    return {
-        "ok": False,
-        "items": [],
-        "attempts": max_attempts,
-        "status": last_status,
-    }
+            logger.debug(f"API error for query '{query}': HTTP {status}")
+            return {"ok": False, "items": [], "attempts": attempt + 1, "status": status}
+        if attempt < max_attempts - 1:
+            await asyncio.sleep(get_retry_delay_seconds(attempt, resp))
+    if status != 429:
+        stats['api_errors'] += 1
+    logger.debug(f"Query '{query}' unresolved after {max_attempts} attempts (last status {status})")
+    return {"ok": False, "items": [], "attempts": max_attempts, "status": status}
 
 
 async def fetch_tournament_detail_async(session, tag):
     """Fetch detailed info for a single tournament by tag asynchronously."""
-    encoded_tag = quote(tag, safe='')
+    return await fetch_api_json_async(session, f"/tournaments/{quote(tag, safe='')}")
+
+
+async def fetch_api_json_async(session, path):
+    """GET one API resource with retries; None when it stays unavailable."""
     max_attempts = 4
     for attempt in range(max_attempts):
         try:
             async with session.get(
-                f"{API_BASE}/tournaments/{encoded_tag}",
+                f"{API_BASE}{path}",
                 headers=get_api_headers(),
                 timeout=API_TIMEOUT,
             ) as resp:
@@ -412,6 +476,68 @@ def fetch_tournament_details_batch(tournaments, progress_cb=None, stop_event=Non
         return tournaments
     return asyncio.run(fetch_tournament_details_batch_async(tournaments, progress_cb, stop_event))
 
+async def fetch_mode_name_from_battles_async(session, mode_id, tournaments):
+    """Internal name of a game mode, read from battle logs of live tournament members."""
+    live = sorted((t for t in tournaments if t.get('status') == 'inProgress'),
+                  key=lambda t: -(t.get('capacity') or 0))
+    for tournament in live[:3]:
+        detail = await _get_cached_tournament_detail_async(session, tournament['tag'])
+        members = sorted((detail or {}).get('membersList') or [], key=lambda m: -(m.get('score') or 0))
+        for member in members[:3]:
+            battles = await fetch_api_json_async(session, f"/players/{quote(member['tag'], safe='')}/battlelog")
+            for battle in battles or []:
+                mode = battle.get('gameMode') or {}
+                if str(mode.get('id')) == mode_id and mode.get('name'):
+                    return mode['name']
+    return None
+
+
+def resolve_unknown_game_modes(tournaments, timeout=8.0, progress_cb=None):
+    """Name and persist mode IDs missing from game_modes.json; returns the newly learned ones."""
+    known = all_game_modes()
+    now = time.time()
+    by_mode = defaultdict(list)
+    for t in tournaments:
+        mode_id = str((t.get('gameMode') or {}).get('id', ''))
+        if (mode_id and mode_id not in known
+                and now - _mode_lookup_failed_at.get(mode_id, 0) > LEARNED_MODE_RETRY_SECONDS):
+            by_mode[mode_id].append(t)
+    if not by_mode:
+        return {}
+    if progress_cb:
+        progress_cb({"phase": "modes", "message": "Naming new game modes"})
+
+    async def resolve_all():
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=get_ssl_context())) as session:
+            ids = list(by_mode)
+            lookups = [fetch_mode_name_from_battles_async(session, mode_id, by_mode[mode_id]) for mode_id in ids]
+            try:
+                names = await asyncio.wait_for(asyncio.gather(*lookups, return_exceptions=True), timeout)
+            except asyncio.TimeoutError:
+                names = [None] * len(ids)
+            return dict(zip(ids, names))
+
+    learned = {}
+    for mode_id, internal in asyncio.run(resolve_all()).items():
+        if isinstance(internal, str):
+            learned[mode_id] = humanize_mode_name(internal)
+            logger.info("Learned game mode %s: %s (%s)", mode_id, learned[mode_id], internal)
+        else:
+            _mode_lookup_failed_at[mode_id] = now
+            logger.info("Could not name game mode %s yet", mode_id)
+    if learned:
+        with _LEARNED_MODES_LOCK:
+            LEARNED_GAME_MODES.update(learned)
+            snapshot = dict(LEARNED_GAME_MODES)
+        try:
+            os.makedirs(os.path.dirname(LEARNED_MODES_PATH), exist_ok=True)
+            with open(LEARNED_MODES_PATH, 'w') as f:
+                json.dump(snapshot, f, indent=2, sort_keys=True)
+        except OSError as exc:
+            logger.warning("Could not persist learned game modes: %s", exc)
+    return learned
+
+
 def fetch_tournament_details_for_in_progress(tournaments, progress_cb=None, stop_event=None):
     """Fetch details only for in-progress tournaments (startedTime matters there)."""
     if not tournaments:
@@ -433,6 +559,7 @@ def _snapshot_search_stats():
         "failed_queries": int(search_stats.get("failed_queries", 0)),
         "verification_passes": int(search_stats.get("verification_passes", 0)),
         "saturated_queries": int(search_stats.get("saturated_queries", 0)),
+        "hedged_requests": int(search_stats.get("hedged_requests", 0)),
         "search_confidence": str(search_stats.get("search_confidence", "unknown")),
         "tournaments_by_mode": dict(search_stats.get("tournaments_by_mode", {})),
     }
@@ -498,6 +625,10 @@ def get_cached_search_results(force_refresh=False, progress_cb=None):
     cache = None
     try:
         tournaments = fetch_all_tournaments(progress_cb=progress_cb)
+        try:
+            resolve_unknown_game_modes(tournaments, progress_cb=progress_cb)
+        except Exception:
+            logger.exception("Game mode lookup failed")
         fetched_at_ts = time.time()
         fetched_at_iso = datetime.now(timezone.utc).isoformat()
         stats_snapshot = _snapshot_search_stats()
@@ -691,7 +822,8 @@ async def fetch_all_tournaments_async(progress_cb=None, stop_event=None):
         emit(phase, completed, scheduled, force=True, unresolved=len(unresolved))
         return unresolved
 
-    connector = aiohttp.TCPConnector(limit=max(WORKERS, VERIFY_WORKERS), ssl=get_ssl_context())
+    # Each query may have up to three hedged spellings in flight.
+    connector = aiohttp.TCPConnector(limit=max(WORKERS, VERIFY_WORKERS) * 3, ssl=get_ssl_context())
     async with aiohttp.ClientSession(connector=connector) as session:
         unresolved = await run_query_phase(session, queries, "crawl", WORKERS)
 
@@ -720,8 +852,9 @@ async def fetch_all_tournaments_async(progress_cb=None, stop_event=None):
 
     logger.info(f"Fetch completed in {elapsed:.1f}s")
     logger.info(
-        "Queries: %s, Retried: %s, Drill-downs: %s, Rate-limits: %s, Errors: %s, Verification passes: %s, Unresolved: %s, Saturated: %s, Confidence: %s",
+        "Queries: %s, Hedged: %s, Retried: %s, Drill-downs: %s, Rate-limits: %s, Errors: %s, Verification passes: %s, Unresolved: %s, Saturated: %s, Confidence: %s",
         stats['queries_completed'],
+        stats['hedged_requests'],
         stats['queries_retried'],
         stats['drill_downs'],
         stats['rate_limits'],
@@ -740,7 +873,7 @@ async def fetch_all_tournaments_async(progress_cb=None, stop_event=None):
     # Log breakdown by game mode
     logger.info("Game Mode breakdown:")
     for mode_id, count in sorted(stats['tournaments_by_mode'].items(), key=lambda x: -x[1]):
-        mode_name = GAME_MODES.get(mode_id, f"Unknown ({mode_id})")
+        mode_name = get_mode_name(mode_id)
         logger.info(f"  - {mode_name}: {count}")
 
     # Publish the finished stats for _snapshot_search_stats() consumers.
@@ -826,7 +959,7 @@ def calc_elapsed_minutes(tournament):
 
 def get_mode_name(mode_id):
     """Get human-readable game mode name"""
-    return GAME_MODES.get(str(mode_id), f"Unknown ({mode_id})")
+    return all_game_modes().get(str(mode_id), f"Unknown ({mode_id})")
 
 
 def filter_tournaments(tournaments, filters, apply_time_filter=True):
@@ -1220,19 +1353,8 @@ def api_tournaments_search_stream():
 @app.route('/api/game-modes')
 @login_required
 def api_game_modes():
-    """Return game mode mapping"""
-    # Only return modes that are commonly used in tournaments
-    common_modes = {
-        "72000001": "Double Elixir",
-        "72000005": "Draft",
-        "72000009": "Normal",
-        "72000013": "Double Elixir Draft",
-        "72000024": "Sudden Death",
-        "72000027": "Triple Elixir",
-        "72000042": "Mega Draft",
-        "72000194": "Triple Draft"
-    }
-    return jsonify(common_modes)
+    """Return the game mode mapping (static snapshot plus learned names)."""
+    return jsonify(all_game_modes())
 
 
 @app.route('/api/logs')

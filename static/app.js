@@ -262,26 +262,51 @@ function renderSavedViews() {
   });
 }
 
+function modeName(id) {
+  return state.gameModes[id] || `Unknown (${id})`;
+}
+
+// Mode filters match by display name: the CR API has many IDs with the same name,
+// and a saved selection should also cover IDs of that mode that appear later.
+function selectedModeNames() {
+  return new Set([...state.filters.modes].map(modeName));
+}
+
 function renderModeChecks() {
   $.modeChecks.innerHTML = '';
-  // Group mode IDs by display name — the CR API has many IDs with the same name.
-  const byName = new Map();
-  for (const [id, name] of Object.entries(state.gameModes || {})) {
-    if (!byName.has(name)) byName.set(name, []);
-    byName.get(name).push(id);
+  // Offer the modes that are actually running, plus every selected one so it can be cleared.
+  // Counts show how many pass the other filters, e.g. "0/7" when all 7 are password-protected.
+  const counts = new Map();
+  for (const t of state.enriched) {
+    if (t.effectiveStatus === 'ended') continue;
+    const name = modeName(t.gameModeId);
+    const c = counts.get(name) || { total: 0, matching: 0 };
+    c.total += 1;
+    if (matchesFilters(t, { ignoreModes: true })) c.matching += 1;
+    counts.set(name, c);
   }
-  const groups = [...byName.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  groups.forEach(([name, ids]) => {
-    const active = ids.some(id => state.filters.modes.has(id));
+  const selected = selectedModeNames();
+  selected.forEach(name => { if (!counts.has(name)) counts.set(name, { total: 0, matching: 0 }); });
+  if (!counts.size) {
+    $.modeChecks.innerHTML = '<div class="db-mode-empty">Modes appear after the first search</div>';
+    return;
+  }
+  const groups = [...counts.entries()].sort((a, b) => b[1].total - a[1].total || a[0].localeCompare(b[0]));
+  groups.forEach(([name, { total, matching }]) => {
+    const active = selected.has(name);
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'db-mode' + (active ? ' active' : '');
     btn.setAttribute('aria-pressed', String(active));
-    btn.innerHTML = `<span class="db-check">${active ? '✓' : ''}</span><span class="db-mode-label">${escapeHtml(name)}</span>`;
+    btn.title = `${matching} of ${total} running match your other filters`;
+    const count = matching === total ? total : `${matching}/${total}`;
+    btn.innerHTML = `<span class="db-check">${active ? '✓' : ''}</span><span class="db-mode-label">${escapeHtml(name)}</span><span class="db-view-count">${count}</span>`;
     btn.addEventListener('click', () => {
-      if (active) ids.forEach(id => state.filters.modes.delete(id));
-      else ids.forEach(id => state.filters.modes.add(id));
-      renderModeChecks();
+      if (active) {
+        [...state.filters.modes].forEach(id => { if (modeName(id) === name) state.filters.modes.delete(id); });
+      } else {
+        Object.keys(state.gameModes).forEach(id => { if (state.gameModes[id] === name) state.filters.modes.add(id); });
+      }
       renderRows();
     });
     $.modeChecks.appendChild(btn);
@@ -304,8 +329,8 @@ function activeFilterDefinitions() {
   if (state.savedView === 'favorites') chips.push({ key: 'view', label: 'Favorites' });
   if (state.savedView === 'high-lvl') chips.push({ key: 'view', label: 'Lvl 15+' });
   if (state.filters.modes.size) {
-    const selectedModeNames = new Set([...state.filters.modes].map(id => state.gameModes[id] || id));
-    chips.push({ key: 'modes', label: `${selectedModeNames.size} mode${selectedModeNames.size === 1 ? '' : 's'}` });
+    const modeCount = selectedModeNames().size;
+    chips.push({ key: 'modes', label: `${modeCount} mode${modeCount === 1 ? '' : 's'}` });
   }
   if (state.filters.levelCaps.size) {
     chips.push({ key: 'levels', label: `Lvl ${[...state.filters.levelCaps].sort((a, b) => a - b).join(', ')}` });
@@ -364,7 +389,7 @@ function resetAllFilters() {
 // ==========================================================
 // Rendering — rows / main list
 // ==========================================================
-function matchesFilters(t) {
+function matchesFilters(t, { ignoreModes = false } = {}) {
   // Ended tournaments can't be joined — never show them.
   if (t.effectiveStatus === 'ended') return false;
 
@@ -373,7 +398,7 @@ function matchesFilters(t) {
   if (state.savedView === 'high-lvl' && (t.levelCap || 0) < 15) return false;
 
   // Sidebar filters
-  if (state.filters.modes.size && !state.filters.modes.has(String(t.gameModeId))) return false;
+  if (!ignoreModes && state.filters.modes.size && !selectedModeNames().has(modeName(t.gameModeId))) return false;
   if (state.filters.levelCaps.size && !state.filters.levelCaps.has(Number(t.levelCap))) return false;
   if (state.filters.minPlayers > 0 && (t.players || 0) < state.filters.minPlayers) return false;
   const mins = Number.isFinite(t.remainingSec) ? t.remainingSec / 60 : null;
@@ -470,6 +495,7 @@ function renderRows() {
 
   // Update counts and saved views (counts depend on tournaments, not filters)
   renderSavedViews();
+  renderModeChecks();
   renderActiveFilters();
 
   // Results meta
@@ -956,6 +982,7 @@ function updateProgress(p) {
   else if (phase === 'wait') label = 'Waiting for active crawl';
   else if (phase === 'crawl') label = 'Crawling tournaments';
   else if (phase === 'verify') label = 'Verifying coverage';
+  else if (phase === 'modes') label = 'Naming new game modes';
   else if (phase === 'details') label = 'Fetching start times';
   else if (phase === 'serialize') label = 'Preparing results';
 
@@ -976,7 +1003,7 @@ function updateProgress(p) {
     $.progressFill.style.width = `${pct}%`;
     $.progressMetrics.textContent = phase === 'details' && total
       ? `${completed}/${total}`
-      : `${pct}%`;
+      : pct >= 90 && pending > 0 ? `${pct}% · ${pending} left` : `${pct}%`;
   }
 }
 
@@ -985,6 +1012,8 @@ function applySearchResponse(data) {
     showToast('Error: ' + data.error);
     return false;
   }
+  // The server names every mode it saw, including ones learned after /api/game-modes loaded.
+  (data.tournaments || []).forEach(t => { if (t.gameModeName) state.gameModes[t.gameModeId] = t.gameModeName; });
   state.tournaments = CrWatch.merge(data.tournaments || []);
   state.fetchedAt = data.fetchedAt || new Date().toISOString();
   state.lastStats = data.stats || null;
