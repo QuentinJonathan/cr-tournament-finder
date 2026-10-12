@@ -2,6 +2,15 @@
 
 // ---------- Service worker ----------
 if ('serviceWorker' in navigator) {
+  // A deploy activates its worker immediately; reload once so the page never runs old
+  // cached scripts against the new server. The first install (no controller yet) needs no reload.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading) return;
+    reloading = true;
+    location.reload();
+  });
   navigator.serviceWorker.register('/service-worker.js').catch(() => {});
 }
 
@@ -34,6 +43,7 @@ const state = {
   search: '',
   quick: null,           // 'live' | 'prep' | null
   autoRefresh: localStorage.getItem('cr.autoRefresh') === '1',
+  modesExpanded: localStorage.getItem('cr.modesExpanded') === '1',
   sort: { by: 'recommended', dir: 'asc' },
   selectedTag: null,
   favorites: new Set(loadFavorites()),
@@ -272,6 +282,8 @@ function selectedModeNames() {
   return new Set([...state.filters.modes].map(modeName));
 }
 
+const MODE_PREVIEW_COUNT = 8;
+
 function renderModeChecks() {
   $.modeChecks.innerHTML = '';
   // Offer the modes that are actually running, plus every selected one so it can be cleared.
@@ -292,7 +304,12 @@ function renderModeChecks() {
     return;
   }
   const groups = [...counts.entries()].sort((a, b) => b[1].total - a[1].total || a[0].localeCompare(b[0]));
-  groups.forEach(([name, { total, matching }]) => {
+  // Most modes run once or twice; keep the most common ones and every selected one in view.
+  const collapsible = groups.length > MODE_PREVIEW_COUNT + 2;
+  const visible = !collapsible || state.modesExpanded
+    ? groups
+    : groups.filter(([name], i) => i < MODE_PREVIEW_COUNT || selected.has(name));
+  visible.forEach(([name, { total, matching }]) => {
     const active = selected.has(name);
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -311,6 +328,19 @@ function renderModeChecks() {
     });
     $.modeChecks.appendChild(btn);
   });
+  if (collapsible) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'db-mode db-mode-more';
+    more.setAttribute('aria-expanded', String(state.modesExpanded));
+    more.textContent = state.modesExpanded ? 'Show fewer modes' : `+ ${groups.length - visible.length} more modes`;
+    more.addEventListener('click', () => {
+      state.modesExpanded = !state.modesExpanded;
+      try { localStorage.setItem('cr.modesExpanded', state.modesExpanded ? '1' : '0'); } catch {}
+      renderModeChecks();
+    });
+    $.modeChecks.appendChild(more);
+  }
 }
 
 function renderLevelCaps() {

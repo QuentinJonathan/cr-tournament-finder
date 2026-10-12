@@ -197,6 +197,8 @@ a { color: var(--db-accent); }
 }
 .db-mode-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .db-mode-empty { padding: 7px 10px; font-size: 11px; color: var(--db-muted); }
+.db-mode.db-mode-more { padding-left: 30px; color: var(--db-muted); }
+.db-mode.db-mode-more:hover { color: var(--db-text); }
 
 /* Level caps */
 .db-levels { display: flex; gap: 3px; flex-wrap: wrap; }
@@ -1284,6 +1286,7 @@ a { color: var(--db-accent); }
     padding: 10px 12px;
     font-size: 13px;
   }
+  .db-mode.db-mode-more { padding-left: 32px; }
   .db-lvl {
     width: 44px;
     height: 38px;

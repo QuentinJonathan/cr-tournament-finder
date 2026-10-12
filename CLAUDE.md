@@ -369,6 +369,12 @@ cache entries. Raw responses: `.runtime/probe-*.jsonl`; re-analyze with `--analy
 The sidebar lists the modes present in the current results (grouped by display name, with
 `matching/total` counts against the other filters) plus any selected ones. Mode filters match by
 display name, so a saved ID such as 72000024 also covers 72000031 ("Sudden Death Battle").
+Only the 8 most common modes plus selected ones are shown; the rest sits behind "+ N more modes"
+(expanded state persisted in localStorage `cr.modesExpanded`).
+
+The page reloads once when a newly deployed service worker takes control (`controllerchange`), so
+it never runs old cached scripts against a new server. Clients still on a version without this
+listener pick up the new scripts on their next launch.
 
 ### Hedged search requests
 
