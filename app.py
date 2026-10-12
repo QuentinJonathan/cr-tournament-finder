@@ -707,9 +707,18 @@ async def fetch_all_tournaments_async(progress_cb=None, stop_event=None):
     WORKERS = int(os.environ.get('SEARCH_WORKERS', 25))
     VERIFY_WORKERS = int(os.environ.get('VERIFY_WORKERS', 5))
     MAX_VERIFICATION_PASSES = int(os.environ.get('MAX_VERIFICATION_PASSES', 2))
-    max_latin_len = int(os.environ.get("MAX_QUERY_LEN", 4))
+    # Saturated latin prefixes keep splitting until a word is distinguished ("emot" -> "emoti").
+    # Costs nothing unless a prefix returns the full 20; identical words stay saturated.
+    max_latin_len = int(os.environ.get("MAX_QUERY_LEN", 10))
     max_cyrillic_len = int(os.environ.get("MAX_CYRILLIC_QUERY_LEN", 2))
     max_arabic_len = int(os.environ.get("MAX_ARABIC_QUERY_LEN", 3))
+
+    def only_reachable_here(name, prefix, chars):
+        # Children only reach words that continue with a probed character; a tournament is at
+        # risk when every searchable word of its name stops at this prefix ("Emote").
+        words = (name or '').lower().split()
+        stops = [w.startswith(prefix) and (len(w) == len(prefix) or w[len(prefix)] not in chars) for w in words]
+        return any(stops) and all(stop or not w[0].isalnum() for w, stop in zip(words, stops))
 
     def drilldown_chars_and_limit(q):
         if any(ch in arabic_letters or ch in arabic_digits for ch in q):
@@ -806,6 +815,9 @@ async def fetch_all_tournaments_async(progress_cb=None, stop_event=None):
                             stats['drill_downs'] += 1
                             for c in chars:
                                 enqueue(query + c)
+                            # A capped answer may hide more tournaments named like these.
+                            if any(only_reachable_here(t.get('name'), query, chars) for t in results):
+                                saturated_queries.add(query)
                         else:
                             saturated_queries.add(query)
                 finally:

@@ -120,7 +120,7 @@ Flask server with these key components:
 - **Caching & Performance Knobs**:
   - Search results are cached in-memory for `SEARCH_CACHE_TTL_SECONDS` (default: 180s). `/api/tournaments/search?force=1` forces a fresh crawl.
   - Detail responses are cached in-memory for `DETAIL_CACHE_TTL_SECONDS` (default: 300s).
-  - Drill-down depth is configurable: `MAX_QUERY_LEN` (default: 4), `MAX_CYRILLIC_QUERY_LEN` (default: 2), `MAX_ARABIC_QUERY_LEN` (default: 3).
+  - Drill-down depth is configurable: `MAX_QUERY_LEN` (default: 10; was 4, which left `emot`, `insi`, `caos`, `torneo` saturated in Oct 2026), `MAX_CYRILLIC_QUERY_LEN` (default: 2), `MAX_ARABIC_QUERY_LEN` (default: 3).
   - Crawl robustness is configurable: `SEARCH_WORKERS`, `DETAIL_WORKERS`, `VERIFY_WORKERS`, `MAX_VERIFICATION_PASSES`, `QUERY_DRILLDOWN_THRESHOLD`.
 
 - **Detail Fetching**: `fetch_tournament_details_batch()` fetches individual tournament details in parallel to get accurate `startedTime` (since hosts can start early before the max prep time). For performance, details are only fetched for `inProgress` tournaments.
@@ -381,6 +381,9 @@ each is its own upstream cache entry): the next one starts whenever nothing answ
 
 `SEARCH_STRATEGY=adaptive` is now the default. A successful prefix response below the known
 20-item cap does not expand; capped branches split using the existing alphabets/depth limits.
+Splitting cannot separate tournaments sharing an identical word (30 × "Emote" stay capped at 20), so
+a capped prefix counts as saturated when one of its results is reachable only through a word that
+stops there (e.g. a tournament named just "Emote"); names with other searchable words do not count.
 Unicode probes and retry/verification behavior are retained. `SEARCH_STRATEGY=legacy` restores
 unconditional aa–zz probes for comparison or rollback.
 

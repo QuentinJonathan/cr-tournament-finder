@@ -31,6 +31,35 @@ class AdaptiveSearchTests(unittest.TestCase):
         self.assertIn('ta', adaptive_queries)
         self.assertLess(len(adaptive_queries), len(queries))
 
+    def test_saturated_prefix_drills_past_four_characters(self):
+        # 30 identical "Emote" names fill every "emot"/"emote" answer; the "Emoticon" ones only
+        # become reachable once the crawl splits beyond four characters.
+        corpus = [{'tag': f'e{i}', 'name': 'Emote'} for i in range(30)]
+        corpus += [{'tag': f'c{i}', 'name': 'Emoticon'} for i in range(3)]
+        async def fake_query(session, query, stats):
+            stats['queries_completed'] += 1
+            matches = [t for t in corpus if any(w.lower().startswith(query) for w in t['name'].split())]
+            return {'ok': True, 'items': matches[:20], 'attempts': 1}
+        with patch.dict(os.environ, {'SEARCH_STRATEGY': 'adaptive'}), patch.object(app, 'fetch_tournaments_by_query_async', fake_query):
+            found = {t['tag'] for t in app.fetch_all_tournaments()}
+        self.assertTrue({'c0', 'c1', 'c2'} <= found)
+        # 30 identical words cannot be split by the API: "emote" stays flagged as incomplete.
+        self.assertEqual(len([t for t in found if t.startswith('e')]), 20)
+        self.assertEqual(app.search_stats['saturated_queries'], 1)
+        self.assertEqual(app.search_stats['search_confidence'], 'medium')
+
+    def test_capped_prefix_whose_words_continue_is_not_flagged(self):
+        corpus = [{'tag': f'e{i}', 'name': f'Emote{i}'} for i in range(25)]
+        corpus += [{'tag': f'a{i}', 'name': f'a {i}x'} for i in range(25)]  # single-letter words
+        async def fake_query(session, query, stats):
+            stats['queries_completed'] += 1
+            matches = [t for t in corpus if any(w.lower().startswith(query) for w in t['name'].split())]
+            return {'ok': True, 'items': matches[:20], 'attempts': 1}
+        with patch.dict(os.environ, {'SEARCH_STRATEGY': 'adaptive'}), patch.object(app, 'fetch_tournaments_by_query_async', fake_query):
+            found = app.fetch_all_tournaments()
+        self.assertEqual(len(found), 50)
+        self.assertEqual(app.search_stats['search_confidence'], 'high')
+
     def test_failed_root_is_retried_in_verification_instead_of_treated_as_empty(self):
         attempts = {}
         async def query(session, q, stats):
