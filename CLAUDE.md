@@ -124,6 +124,8 @@ Flask server with these key components:
   - Crawl robustness is configurable: `SEARCH_WORKERS`, `DETAIL_WORKERS`, `VERIFY_WORKERS`, `MAX_VERIFICATION_PASSES`, `QUERY_DRILLDOWN_THRESHOLD`.
 
 - **Detail Fetching**: `fetch_tournament_details_batch()` fetches individual tournament details in parallel to get accurate `startedTime` (since hosts can start early before the max prep time). For performance, details are only fetched for `inProgress` tournaments.
+  This runs once per crawl inside `get_cached_search_results()`, so concurrent callers share it (three per-request batches after an iPhone cold start drew ~200 HTTP 429s and took 68-127 s in Oct 2026).
+  `DETAIL_PHASE_BUDGET_SECONDS` (default 8) cuts off stragglers, which keep the estimated timing; `Retry-After` waits are capped at 10 s.
 
 - **Time Calculation**: `calc_remaining_minutes()` and `calc_elapsed_minutes()` use `startedTime` from detail API when available, falling back to estimated time (createdTime + preparationDuration).
 

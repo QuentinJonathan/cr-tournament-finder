@@ -141,7 +141,8 @@ def get_retry_delay_seconds(attempt, response=None):
                 retry_after = 0.0
 
     backoff = min(5.0, 0.75 * (2 ** attempt))
-    return max(retry_after, backoff)
+    # Searches are interactive; a long Retry-After would freeze the progress bar.
+    return min(10.0, max(retry_after, backoff))
 
 
 def compute_search_confidence(stats):
@@ -463,10 +464,19 @@ async def fetch_tournament_details_batch_async(tournaments, progress_cb=None, st
         completed += 1
         emit()
 
+    # Start times only refine the countdown; stragglers keep the estimated timing.
+    budget = float(os.environ.get('DETAIL_PHASE_BUDGET_SECONDS', 8))
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=get_ssl_context())) as session:
         sem = asyncio.Semaphore(max_detail_workers)
-        tasks = [fetch_and_update(tag, session, sem) for tag in tags]
-        await asyncio.gather(*tasks)
+        tasks = [asyncio.ensure_future(fetch_and_update(tag, session, sem)) for tag in tags]
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=budget)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if pending:
+                logger.warning("Detail phase stopped after %ss: %s of %s start times missing",
+                               budget, len(pending), total)
 
     emit(force=True)
     return tournaments
@@ -629,6 +639,9 @@ def get_cached_search_results(force_refresh=False, progress_cb=None):
             resolve_unknown_game_modes(tournaments, progress_cb=progress_cb)
         except Exception:
             logger.exception("Game mode lookup failed")
+        # Start times are fetched once per crawl and shared by every waiting caller;
+        # per-request batches multiplied the load and ran into HTTP 429.
+        fetch_tournament_details_for_in_progress(tournaments, progress_cb=progress_cb)
         fetched_at_ts = time.time()
         fetched_at_iso = datetime.now(timezone.utc).isoformat()
         stats_snapshot = _snapshot_search_stats()
@@ -1219,11 +1232,8 @@ def api_tournaments_search():
     total_count = len(tournaments)
     cached_stats = cache.get("stats", _snapshot_search_stats())
 
-    # Phase 2: Fetch details only for in-progress tournaments (startedTime matters there)
-    logger.info(f"Fetching details for in-progress tournaments (from {total_count} total)...")
-    tournaments = fetch_tournament_details_for_in_progress(tournaments)
-
-    logger.info(f"=== FETCH COMPLETE: {len(tournaments)} tournaments ===")
+    # Start times of in-progress tournaments were fetched with the crawl.
+    logger.info(f"=== FETCH COMPLETE: {total_count} tournaments ===")
 
     return jsonify(build_tournaments_search_payload(
         tournaments=tournaments,
@@ -1279,7 +1289,6 @@ def api_tournaments_search_stream():
     force_refresh = request.args.get("force", "").strip() in ("1", "true", "yes")
 
     q = queue.Queue()
-    stop_event = threading.Event()
 
     def push_event(event_type, data):
         try:
@@ -1316,11 +1325,6 @@ def api_tournaments_search_stream():
                 stats_snapshot = cache.get("stats", _snapshot_search_stats())
                 fetched_at_iso = cache.get("fetchedAt") or datetime.now(timezone.utc).isoformat()
 
-            # Details phase (only in-progress tournaments)
-            in_progress = [t for t in tournaments if t.get('status') == 'inProgress']
-            progress_cb({"phase": "details", "completed": 0, "total": len(in_progress)})
-            fetch_tournament_details_batch(in_progress, progress_cb=progress_cb, stop_event=stop_event)
-
             progress_cb({"phase": "serialize", "message": "Preparing results"})
 
             payload = build_tournaments_search_payload(
@@ -1338,21 +1342,18 @@ def api_tournaments_search_stream():
     threading.Thread(target=worker, daemon=True).start()
 
     def gen():
-        try:
-            # Tell EventSource how long to wait before retrying if it reconnects.
-            yield "retry: 1500\n\n"
-            while True:
-                try:
-                    item = q.get(timeout=1.0)
-                except queue.Empty:
-                    # Keep-alive comment.
-                    yield ": keepalive\n\n"
-                    continue
-                if item is None:
-                    break
-                yield item
-        finally:
-            stop_event.set()
+        # Tell EventSource how long to wait before retrying if it reconnects.
+        yield "retry: 1500\n\n"
+        while True:
+            try:
+                item = q.get(timeout=1.0)
+            except queue.Empty:
+                # Keep-alive comment.
+                yield ": keepalive\n\n"
+                continue
+            if item is None:
+                break
+            yield item
 
     headers = {
         "Cache-Control": "no-cache",
