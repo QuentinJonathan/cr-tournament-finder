@@ -937,6 +937,42 @@ a { color: var(--db-accent); }
   white-space: nowrap;
 }
 
+/* Description + creator/password hints */
+.db-desc-card {
+  padding: 10px;
+  background: var(--db-bg-0);
+  border: 1px solid var(--db-border);
+  border-radius: 6px;
+}
+.db-desc-text {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--db-text);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.db-desc-hints:not(:empty) { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.db-hint { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11px; color: var(--db-muted); }
+.db-hint-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--db-gold);
+  background: var(--db-gold-ghost);
+  border: none;
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.db-hint a { color: var(--db-text-2); text-decoration: underline; text-underline-offset: 2px; }
+.db-hint a:hover { color: var(--db-text); }
+.db-row-hint {
+  margin-left: 6px;
+  color: var(--db-gold);
+  font-family: 'JetBrains Mono', monospace;
+}
+
 .db-flex-fill { flex: 1; }
 
 /* Big join button */

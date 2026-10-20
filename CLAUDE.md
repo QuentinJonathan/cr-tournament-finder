@@ -126,6 +126,7 @@ Flask server with these key components:
 - **Detail Fetching**: `fetch_tournament_details_batch()` fetches individual tournament details in parallel to get accurate `startedTime` (since hosts can start early before the max prep time). For performance, details are only fetched for `inProgress` tournaments.
   This runs once per crawl inside `get_cached_search_results()`, so concurrent callers share it (three per-request batches after an iPhone cold start drew ~200 HTTP 429s and took 68-127 s in Oct 2026).
   `DETAIL_PHASE_BUDGET_SECONDS` (default 8) cuts off stragglers, which keep the estimated timing; `Retry-After` waits are capped at 10 s.
+  Details are fetched for all tournaments (~2-3 s for ~110-200), because only the detail endpoint returns `description`.
 
 - **Time Calculation**: `calc_remaining_minutes()` and `calc_elapsed_minutes()` use `startedTime` from detail API when available, falling back to estimated time (createdTime + preparationDuration).
 
@@ -378,6 +379,16 @@ The page reloads once when a newly deployed service worker takes control (`contr
 it never runs old cached scripts against a new server. Clients still on a version without this
 listener pick up the new scripts on their next launch.
 
+### Descriptions and password hints
+
+The API never exposes passwords. Creator tournaments are hosted by Supercell's `Creators` account
+(`creatorTag` #20VQJUJYQG), so the host does not identify the streamer, but `description` (and
+sometimes the name) often carries the lead: "Pass = 98CR", "CODIGO: MAWI", "poner dark en la tienda",
+"TG:@Channel". `static/hints.js` (`CrHints.extract`, tested in `tests/test_hints.js`) extracts
+password, code and channel hints; the row shows the first one, the detail panel shows the full
+description, copyable values, profile links and TikTok/YouTube/Twitch searches (plus a name search
+for every password tournament). The search box also matches descriptions.
+
 ### Hedged search requests
 
 Single search responses occasionally stall for 5-10+ s (normal p99 < 1 s), which used to leave the
@@ -401,5 +412,5 @@ and compares tags present in both baseline runs. Last measured: all 174 stable t
 not proof of exhaustive coverage for every future API state. Report: `.runtime/search-benchmark.json`.
 
 Checks: `.venv/bin/python -m unittest discover -s tests -v` and
-`node --test tests/test_timing.js tests/test_service_worker.js tests/test_watch_frontend.js`. Push encryption tests use real
+`node --test tests/test_timing.js tests/test_hints.js tests/test_service_worker.js tests/test_watch_frontend.js`. Push encryption tests use real
 VAPID/aes128gcm encryption with a mocked HTTP transport; no message is sent by these tests.

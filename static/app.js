@@ -215,6 +215,9 @@ function grabRefs() {
     detailFavBtn: id('detail-fav-btn'),
     detailCopyBtn: id('detail-copy-btn'),
     detailWatchBtn: id('detail-watch-btn'),
+    detailDescSection: id('detail-desc-section'),
+    detailDesc: id('detail-desc'),
+    detailDescHints: id('detail-desc-hints'),
 
     toast: id('toast'),
 
@@ -444,7 +447,7 @@ function matchesFilters(t, { ignoreModes = false } = {}) {
   // Search
   const q = state.search.trim().toLowerCase();
   if (q) {
-    const hay = `${t.name || ''} ${t.tag || ''} ${t.gameModeName || ''}`.toLowerCase();
+    const hay = `${t.name || ''} ${t.tag || ''} ${t.gameModeName || ''} ${t.description || ''}`.toLowerCase();
     if (!hay.includes(q)) return false;
   }
   return true;
@@ -579,6 +582,46 @@ function renderRows() {
   highlightSelectedRow();
 }
 
+// Hints (password, creator code, channel) from name + description, cached per text.
+const hintCache = new Map();
+function hintsFor(t) {
+  const key = `${t.name || ''}\u0000${t.description || ''}`;
+  if (!hintCache.has(key)) hintCache.set(key, CrHints.extract(t.name, t.description));
+  return hintCache.get(key);
+}
+
+const HINT_ICONS = { password: '🔑', code: '🏷', channel: '📣' };
+
+function rowHintHtml(t) {
+  const [hint] = hintsFor(t);
+  if (!hint) return '';
+  const text = hint.kind === 'channel' ? `@${hint.value}` : `${HINT_ICONS[hint.kind]} ${hint.value}`;
+  return `<span class="db-row-hint" title="From the tournament description">${escapeHtml(text)}</span>`;
+}
+
+function linksHtml(links) {
+  const profile = links.filter(l => l.profile)
+    .map(l => `<a href="${escapeAttr(l.url)}" target="_blank" rel="noopener">${escapeHtml(l.label)} ↗</a>`);
+  const search = links.filter(l => !l.profile)
+    .map(l => `<a href="${escapeAttr(l.url)}" target="_blank" rel="noopener">${escapeHtml(l.label)}</a>`);
+  return [...profile, `Search: ${search.join(' ')}`].join(' · ');
+}
+
+function detailHintsHtml(t) {
+  const rows = hintsFor(t).map(h => {
+    const label = h.kind === 'password' ? 'Password'
+      : h.kind === 'code' ? 'Code'
+      : CrHints.platformName(h.platform) || 'Channel';
+    const value = `<button type="button" class="db-hint-value" data-copy="${escapeAttr(h.value)}" title="Copy">${escapeHtml(h.value)}</button>`;
+    return `<div class="db-hint"><span>${HINT_ICONS[h.kind]} ${escapeHtml(label)}</span>${value}${h.kind === 'password' ? '' : linksHtml(CrHints.links(h))}</div>`;
+  });
+  // Creators announce password tournaments on stream; the name is often the only lead.
+  if (t.type === 'passwordProtected' && t.name) {
+    rows.push(`<div class="db-hint"><span>🔎 Name</span>${linksHtml(CrHints.links({ kind: 'name', value: t.name }))}</div>`);
+  }
+  return rows.join('');
+}
+
 function rowHtml(t) {
   const fav = state.favorites.has(t.tag);
   const pct = Math.max(0, Math.min(100, t.maxPlayers ? (t.players / t.maxPlayers) * 100 : 0));
@@ -599,7 +642,7 @@ function rowHtml(t) {
           ${isPwd ? '<span class="db-row-lock" title="Password">🔒</span>' : ''}
           <button type="button" class="db-row-name" data-open-details title="${escapeAttr(t.name || '')}" aria-label="Open details for ${escapeAttr(t.name || 'tournament')}">${escapeHtml(t.name || '—')}</button>
         </div>
-        <div class="db-row-sub"><span class="db-sub-mode">${escapeHtml(t.gameModeName || '—')} · </span>#${escapeHtml(cleanTag)}</div>
+        <div class="db-row-sub"><span class="db-sub-mode">${escapeHtml(t.gameModeName || '—')} · </span>#${escapeHtml(cleanTag)}${rowHintHtml(t)}</div>
       </div>
       <div class="db-row-mode" title="${escapeAttr(t.gameModeName || '')}">${escapeHtml(t.gameModeName || '—')}</div>
       <div class="db-row-players">
@@ -714,6 +757,7 @@ function renderDetail() {
     $.detailAccessSub.textContent = '—';
     $.detailTimingLine.textContent = '—';
     $.detailTimingSub.textContent = '—';
+    $.detailDescSection.classList.add('hidden');
     $.detailJoin.removeAttribute('href');
     $.detailFav.classList.remove('favorited');
     $.detailFavBtn.classList.remove('favorited');
@@ -766,6 +810,13 @@ function renderDetail() {
     $.detailTimingLine.textContent = `Duration: ${durMin}m`;
     $.detailTimingSub.textContent = 'Timing unavailable';
   }
+
+  // Description (detail API only) with extracted creator/password hints
+  const hintsHtml = detailHintsHtml(t);
+  $.detailDescSection.classList.toggle('hidden', !t.description && !hintsHtml);
+  $.detailDesc.textContent = t.description || '';
+  $.detailDesc.classList.toggle('hidden', !t.description);
+  $.detailDescHints.innerHTML = hintsHtml;
 
   // Join link
   $.detailJoin.href = `https://link.clashroyale.com/en?clashroyale://joinTournament?id=${encodeURIComponent(cleanTag)}`;
@@ -1316,6 +1367,10 @@ function wire() {
   };
   $.detailCopy.addEventListener('click', copyCurrentTag);
   $.detailCopyBtn.addEventListener('click', copyCurrentTag);
+  $.detailDescHints.addEventListener('click', e => {
+    const value = e.target.closest('[data-copy]')?.dataset.copy;
+    if (value) copyToClipboard(value);
+  });
 
   // Settings drawer
   $.settingsBtn.addEventListener('click', openSettings);

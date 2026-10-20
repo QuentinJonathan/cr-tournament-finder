@@ -74,7 +74,9 @@ class SearchCacheTests(unittest.TestCase):
         def fake_details(tournaments, progress_cb=None, stop_event=None):
             detail_batches.append([t["tag"] for t in tournaments])
             for t in tournaments:
-                t["startedTime"] = "20261019T170000.000Z"
+                t["description"] = "CODIGO: MAWI"
+                if t["status"] == "inProgress":
+                    t["startedTime"] = "20261019T170000.000Z"
             return tournaments
 
         results = []
@@ -90,9 +92,11 @@ class SearchCacheTests(unittest.TestCase):
             for thread in threads:
                 thread.join(timeout=2)
 
-        self.assertEqual(detail_batches, [["#LIVE"]])
+        # One batch for all tournaments: start times for live ones, descriptions for every one.
+        self.assertEqual(detail_batches, [["#LIVE", "#PREP"]])
         self.assertEqual(len(results), 3)
         self.assertEqual(results[0]["tournaments"][0]["startedTime"], "20261019T170000.000Z")
+        self.assertEqual(results[0]["tournaments"][1]["description"], "CODIGO: MAWI")
 
 
 class DetailPhaseTests(unittest.TestCase):

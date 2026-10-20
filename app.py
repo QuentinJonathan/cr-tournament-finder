@@ -456,10 +456,9 @@ async def fetch_tournament_details_batch_async(tournaments, progress_cb=None, st
 
         tournament = by_tag.get(tag)
         if tournament and detail:
-            if 'startedTime' in detail:
-                tournament['startedTime'] = detail['startedTime']
-            if 'endedTime' in detail:
-                tournament['endedTime'] = detail['endedTime']
+            for field in ('startedTime', 'endedTime', 'description'):
+                if field in detail:
+                    tournament[field] = detail[field]
 
         completed += 1
         emit()
@@ -639,9 +638,9 @@ def get_cached_search_results(force_refresh=False, progress_cb=None):
             resolve_unknown_game_modes(tournaments, progress_cb=progress_cb)
         except Exception:
             logger.exception("Game mode lookup failed")
-        # Start times are fetched once per crawl and shared by every waiting caller;
-        # per-request batches multiplied the load and ran into HTTP 429.
-        fetch_tournament_details_for_in_progress(tournaments, progress_cb=progress_cb)
+        # Details (start times, descriptions with creator codes or password hints) are fetched
+        # once per crawl and shared by every waiting caller; per-request batches ran into HTTP 429.
+        fetch_tournament_details_batch(tournaments, progress_cb=progress_cb)
         fetched_at_ts = time.time()
         fetched_at_iso = datetime.now(timezone.utc).isoformat()
         stats_snapshot = _snapshot_search_stats()
@@ -1232,7 +1231,7 @@ def api_tournaments_search():
     total_count = len(tournaments)
     cached_stats = cache.get("stats", _snapshot_search_stats())
 
-    # Start times of in-progress tournaments were fetched with the crawl.
+    # Details (start times, descriptions) were fetched with the crawl.
     logger.info(f"=== FETCH COMPLETE: {total_count} tournaments ===")
 
     return jsonify(build_tournaments_search_payload(
@@ -1254,6 +1253,7 @@ def build_tournaments_search_payload(tournaments, fetched_at_iso, stats_snapshot
             "players": t.get('capacity', 0),
             "maxPlayers": t.get('maxCapacity', 0),
             "levelCap": t.get('levelCap'),
+            "description": t.get('description') or '',
             "gameModeId": str(t.get('gameMode', {}).get('id', '')),
             "gameModeName": get_mode_name(t.get('gameMode', {}).get('id')),
             # Raw time fields for client-side calculation
